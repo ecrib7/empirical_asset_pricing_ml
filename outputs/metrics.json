@@ -1,0 +1,22 @@
+{
+  "ENet+H": {
+    "oos_r2_pct": 0.1,
+    "hl_sharpe": 0.635
+  },
+  "GLM+H": {
+    "oos_r2_pct": 0.079,
+    "hl_sharpe": 0.629
+  },
+  "OLS-3": {
+    "oos_r2_pct": -0.041,
+    "hl_sharpe": 0.0
+  },
+  "PCR": {
+    "oos_r2_pct": -0.007,
+    "hl_sharpe": 0.355
+  },
+  "PLS": {
+    "oos_r2_pct": 0.008,
+    "hl_sharpe": 0.712
+  }
+}
