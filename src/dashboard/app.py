@@ -66,12 +66,21 @@ def load_dm_table() -> pd.DataFrame:
 
 
 @st.cache_data
-def load_portfolio_returns() -> dict:
+def load_portfolio_bundle() -> dict:
+    """Load net / gross / turnover portfolio dicts (see ``reporting.portfolio_io``)."""
+    from src.reporting.portfolio_io import unpack_portfolio_bundle
+
     p = OUT / "portfolio_returns.pkl"
-    if p.exists():
-        with open(p, "rb") as f:
-            return pickle.load(f)
-    return {}
+    if not p.exists():
+        return {"net": {}, "gross": None, "turnover": None, "meta": {}}
+    with open(p, "rb") as f:
+        raw = pickle.load(f)
+    net, gross, turnover, meta = unpack_portfolio_bundle(raw)
+    return {"net": net, "gross": gross, "turnover": turnover, "meta": meta}
+
+
+def _model_metrics(metrics: dict) -> dict:
+    return {k: v for k, v in metrics.items() if not str(k).startswith("_") and isinstance(v, dict)}
 
 
 # ── Colour palette matching GKX figures ───────────────────────────────────────
@@ -110,14 +119,21 @@ st.caption("Replication of Gu, Kelly & Xiu (2019) — NBER WP 25398")
 if section == "Overview":
     col1, col2, col3, col4 = st.columns(4)
     metrics = load_metrics()
-    best_r2 = max((v["oos_r2_pct"] for v in metrics.values()), default=np.nan)
-    best_sr = max((v["hl_sharpe"]  for v in metrics.values() if not np.isnan(v.get("hl_sharpe", np.nan))), default=np.nan)
-    best_model = max(metrics, key=lambda k: metrics[k].get("oos_r2_pct", -np.inf), default="—")
+    mm = _model_metrics(metrics)
+    best_r2 = max((v["oos_r2_pct"] for v in mm.values()), default=np.nan)
+    best_sr = max((v["hl_sharpe"] for v in mm.values() if not np.isnan(v.get("hl_sharpe", np.nan))), default=np.nan)
+    best_model = max(mm, key=lambda k: mm[k].get("oos_r2_pct", -np.inf), default="—")
 
     col1.metric("Best OOS R² (%)", f"{best_r2:.3f}" if not np.isnan(best_r2) else "—")
     col2.metric("Best H-L Sharpe", f"{best_sr:.2f}" if not np.isnan(best_sr) else "—")
     col3.metric("Best Model", best_model)
-    col4.metric("Models Evaluated", len(metrics))
+    col4.metric("Models Evaluated", len(mm))
+    rep = metrics.get("_reporting", {})
+    if rep.get("hl_returns_are_net_of_engine_tc"):
+        st.caption(
+            "H-L Sharpe above is **net** of engine TC (see metrics). "
+            "Gross H-L Sharpe is in the Sharpe tab when available."
+        )
 
     st.markdown("---")
     st.subheader("Paper Summary")
@@ -237,12 +253,24 @@ elif section == "DM Tests":
 # =============================================================================
 elif section == "Portfolio Returns":
     st.subheader("Long-Short Decile Portfolio Returns — GKX Figure 9 Replica")
-    port_rets = load_portfolio_returns()
+    bundle = load_portfolio_bundle()
+    port_rets = bundle["net"]
+    gross_bundle = bundle.get("gross")
 
     if not port_rets:
         st.warning("No portfolio results yet.")
     else:
+        rep = load_metrics().get("_reporting", {})
+        if rep.get("hl_returns_are_net_of_engine_tc"):
+            st.caption(
+                "Plotted H-L paths are **net** of transaction costs applied in the backtest engine. "
+                "Gross H-L series are available in the pickle bundle when present."
+            )
         models_avail = list(port_rets.keys())
+        show_gross = bool(
+            gross_bundle
+            and st.checkbox("Overlay gross H-L (pre-engine TC)", value=False)
+        )
         selected = st.multiselect(
             "Select models to plot",
             models_avail,
@@ -261,12 +289,26 @@ elif section == "Portfolio Returns":
                     cum = (1 + hl).cumprod()
                     fig.add_trace(px2.Scatter(
                         x=cum.index, y=cum.values,
-                        name=model,
+                        name=f"{model} (net)",
                         line=dict(color=MODEL_COLORS.get(model, "#888"), width=2),
                     ))
+                    if show_gross and gross_bundle.get(model):
+                        ghl = gross_bundle[model].get("H-L", pd.Series(dtype=float))
+                        ghl = ghl.reindex(hl.index).dropna()
+                        if len(ghl) > 0:
+                            gc = (1 + ghl).cumprod()
+                            fig.add_trace(px2.Scatter(
+                                x=gc.index, y=gc.values,
+                                name=f"{model} (gross)",
+                                line=dict(
+                                    color=MODEL_COLORS.get(model, "#888"),
+                                    width=1,
+                                    dash="dash",
+                                ),
+                            ))
                 fig.update_layout(
-                    title="Cumulative Return: Long-Short Decile Spread",
-                    yaxis_title="Cumulative Return",
+                    title="Cumulative return: long-short decile spread",
+                    yaxis_title="Cumulative return",
                     xaxis_title="Date",
                     height=500,
                     legend=dict(x=0.02, y=0.98),
@@ -282,6 +324,8 @@ elif section == "Portfolio Returns":
 
         # Decile performance table
         st.subheader("Decile Performance (GKX Table 7)")
+        if rep.get("hl_returns_are_net_of_engine_tc"):
+            st.caption("Table uses **net** decile returns (engine transaction costs applied).")
         model_sel = st.selectbox("Model", models_avail)
         if model_sel:
             from src.evaluation.metrics import sharpe_ratio
@@ -307,23 +351,26 @@ elif section == "Portfolio Returns":
 elif section == "Sharpe Ratios":
     st.subheader("H-L Sharpe Ratios & Campbell-Thompson SR Improvement")
     metrics = load_metrics()
+    mm = _model_metrics(metrics)
 
-    if not metrics:
+    if not mm:
         st.warning("No results yet.")
     else:
         df = pd.DataFrame([
             {"Model": k,
-             "H-L Sharpe": v.get("hl_sharpe", np.nan),
+             "H-L Sharpe (net)": v.get("hl_sharpe", np.nan),
+             "H-L Sharpe (gross)": v.get("hl_sharpe_gross", np.nan),
+             "Mean TO (1-way)": v.get("hl_mean_turnover_one_way", np.nan),
              "OOS R² (%)": v.get("oos_r2_pct", np.nan)}
-            for k, v in metrics.items()
-        ]).dropna()
+            for k, v in mm.items()
+        ])
 
         if not df.empty:
             try:
                 import plotly.express as px
                 fig = px.scatter(
-                    df, x="OOS R² (%)", y="H-L Sharpe",
-                    text="Model", title="OOS R² vs Sharpe Ratio",
+                    df, x="OOS R² (%)", y="H-L Sharpe (net)",
+                    text="Model", title="OOS R² vs H-L Sharpe (net of engine TC)",
                     color="Model",
                 )
                 fig.update_traces(textposition="top center")
@@ -340,41 +387,61 @@ elif section == "Sharpe Ratios":
 #  TRANSACTION COSTS
 # =============================================================================
 elif section == "Transaction Costs":
-    st.subheader("Transaction Cost Sensitivity Analysis")
-    port_rets = load_portfolio_returns()
+    st.subheader("Transaction Cost Sensitivity (incremental on top of engine)")
+    bundle = load_portfolio_bundle()
+    port_net = bundle["net"]
+    turnover_b = bundle.get("turnover")
+    metrics = load_metrics()
+    rep = metrics.get("_reporting", {})
 
-    if not port_rets:
+    if not port_net:
         st.warning("Run the pipeline first.")
     else:
-        from src.evaluation.metrics import sharpe_ratio
-        from src.backtest.engine import TransactionCostModel
+        from src.reporting.portfolio_io import hl_additional_tc_sharpe
 
-        tc_range = np.arange(0, 51, 5)   # 0 to 50 bps
+        if rep.get("hl_returns_are_net_of_engine_tc"):
+            st.info(
+                f"Primary H-L series are **already net** of engine TC "
+                f"({rep.get('hl_engine_tc_bps_default', '?')} bps one-way). "
+                "The chart below applies **additional** hypothetical one-way costs "
+                "using stored month-over-month turnover (no double-count of the engine fee)."
+            )
+        else:
+            st.caption(
+                "Engine TC was zero; H-L series are gross. "
+                "Additional bps below are hypothetical incremental costs."
+            )
+
+        extra_tc_range = np.arange(0, 51, 5)
         models_to_plot = [m for m in ["NN3", "RF", "GBRT+H", "ENet+H", "OLS-3"]
-                          if m in port_rets]
+                          if m in port_net]
 
         rows = []
-        for tc_bps in tc_range:
-            row = {"TC (bps)": tc_bps}
+        for extra_bps in extra_tc_range:
+            row = {"Additional TC (bps, one-way)": extra_bps}
             for model in models_to_plot:
-                hl = port_rets[model].get("H-L", pd.Series(dtype=float)).dropna()
+                hl = port_net[model].get("H-L", pd.Series(dtype=float)).dropna()
                 if len(hl) == 0:
                     row[model] = np.nan
                     continue
-                # Approximate monthly turnover from paper (~120% per month)
-                monthly_turnover = 1.2
-                net_hl = hl - (tc_bps / 10000) * monthly_turnover
-                row[model] = sharpe_ratio(net_hl)
+                to = None
+                if turnover_b and model in turnover_b:
+                    to = turnover_b[model].get("H-L")
+                row[model] = hl_additional_tc_sharpe(hl, to, float(extra_bps))
             rows.append(row)
 
-        df_tc = pd.DataFrame(rows).set_index("TC (bps)")
+        df_tc = pd.DataFrame(rows).set_index("Additional TC (bps, one-way)")
 
         try:
             import plotly.express as px
             fig = px.line(
-                df_tc.reset_index().melt(id_vars="TC (bps)", var_name="Model", value_name="Net Sharpe"),
-                x="TC (bps)", y="Net Sharpe", color="Model",
-                title="Net Sharpe Ratio vs Transaction Costs",
+                df_tc.reset_index().melt(
+                    id_vars="Additional TC (bps, one-way)",
+                    var_name="Model",
+                    value_name="H-L Sharpe",
+                ),
+                x="Additional TC (bps, one-way)", y="H-L Sharpe", color="Model",
+                title="H-L Sharpe vs additional one-way TC (engine TC not re-applied)",
                 color_discrete_map=MODEL_COLORS,
             )
             fig.add_hline(y=0, line_dash="dash", line_color="black")
@@ -383,10 +450,9 @@ elif section == "Transaction Costs":
             st.line_chart(df_tc)
 
         st.dataframe(df_tc.style.format("{:.3f}").background_gradient(cmap="RdYlGn", axis=None))
-        st.info(
-            "Monthly portfolio turnover is ~120% for NN-based strategies. "
-            "At 10 bps one-way cost (our default), NN3 remains profitable. "
-            "At >40 bps, most strategies break even."
+        st.warning(
+            "If turnover was not stored (legacy pickle), additional TC Sharpe is blank "
+            "for extra bps > 0 — re-run the pipeline to populate turnover."
         )
 
 

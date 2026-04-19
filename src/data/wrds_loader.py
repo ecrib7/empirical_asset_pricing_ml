@@ -14,7 +14,7 @@ Usage
     crsp   = loader.get_crsp_monthly()
     comp_a = loader.get_compustat_annual()
     comp_q = loader.get_compustat_quarterly()
-    macro  = loader.get_macro_predictors()
+    macro  = loader.get_macro_predictors(goyal_csv_path="PredictorData2023.xlsx")
 """
 
 import os
@@ -33,9 +33,20 @@ except ImportError:
     HAS_WRDS = False
     warnings.warn("wrds package not installed. Install with: pip install wrds")
 
-from src.config import FREQ_MONTH_END
+from src.config import FREQ_MONTH_END, MACRO_VARS
 
 logger = logging.getLogger(__name__)
+
+
+def _macro_frame_looks_like_zero_stub(df: pd.DataFrame) -> bool:
+    """
+    Detect legacy all-zero synthetic macro files (older code cached stubs
+    to the same path as real macro data).
+    """
+    cols = list(MACRO_VARS)
+    if len(df) == 0 or not all(c in df.columns for c in cols):
+        return False
+    return float(df[cols].fillna(0.0).abs().sum().sum()) == 0.0
 
 
 class WRDSLoader:
@@ -237,6 +248,7 @@ class WRDSLoader:
         self,
         goyal_csv_path: Optional[str] = None,
         force_refresh: bool = False,
+        allow_macro_stub: bool = False,
     ) -> pd.DataFrame:
         """
         Load Welch & Goyal (2008) macro predictors.
@@ -245,7 +257,12 @@ class WRDSLoader:
         1. goyal_csv_path  – local CSV downloaded from Amit Goyal's website
            (https://sites.google.com/view/agoyal145)
         2. WRDS macro table (if available)
-        3. Synthetic stub for testing (constant values – clearly labelled)
+        3. Synthetic stub (only if ``allow_macro_stub`` is True, e.g. dev/CI)
+
+        By default (``allow_macro_stub=False``) the loader **does not** fall
+        back to silent all-zero stubs: real pipelines must supply Goyal data or
+        a working WRDS macro table. Set env ``GKX_ALLOW_MACRO_STUB=1`` from
+        callers that intentionally need stubs.
 
         Returns monthly DataFrame with columns:
             date, dp, ep, bm, ntis, tbl, tms, dfy, svar
@@ -254,8 +271,16 @@ class WRDSLoader:
         if force_refresh:
             self._cache_path(cache_name).unlink(missing_ok=True)
         path = self._cache_path(cache_name)
-        if path.exists():
-            return pd.read_parquet(path)
+        if path.exists() and not force_refresh:
+            df = pd.read_parquet(path)
+            if (not allow_macro_stub) and _macro_frame_looks_like_zero_stub(df):
+                raise RuntimeError(
+                    f"Cached macro file appears to be an all-zero stub from an older "
+                    f"run: {path}\n"
+                    "Delete that file (or use force_refresh), supply --goyal-csv, or "
+                    "set environment variable GKX_ALLOW_MACRO_STUB=1 to allow stubs."
+                )
+            return df
 
         # ── Option 1: user-provided CSV ──
         if goyal_csv_path and Path(goyal_csv_path).exists():
@@ -271,10 +296,18 @@ class WRDSLoader:
         except Exception as e:
             logger.warning(f"Could not fetch macro from WRDS: {e}")
 
-        # ── Option 3: synthetic stub (warns user) ──
+        # ── Option 3: synthetic stub (explicit opt-in only) ──
+        if not allow_macro_stub:
+            raise RuntimeError(
+                "Macro predictors unavailable: no valid --goyal-csv path, and WRDS "
+                "macro fetch failed (see log). Refusing to use silent all-zero stubs.\n"
+                "Fix: download PredictorData2023.xlsx from Amit Goyal's site and pass "
+                "--goyal-csv, fix WRDS access to goyal.macro_predictors, or for "
+                "development-only set environment variable GKX_ALLOW_MACRO_STUB=1."
+            )
         logger.warning(
-            "Using synthetic macro predictor stubs. "
-            "Download PredictorData2023.xlsx from Amit Goyal's website for real data."
+            "allow_macro_stub=True: using synthetic macro predictor stubs (all zeros). "
+            "Not valid for research replication."
         )
         dates = pd.date_range(self.start_date, self.end_date, freq=FREQ_MONTH_END)
         df = pd.DataFrame({"date": dates})
@@ -359,15 +392,29 @@ def merge_crsp_compustat(
     crsp["permno"] = crsp["permno"].astype(int)
     comp["permno"] = comp["permno"].astype(int)
 
-    # Sort to enable merge_asof
-    crsp = crsp.sort_values(["permno", "date"]).reset_index(drop=True)
-    comp = comp.sort_values(["permno", "avail_date"]).reset_index(drop=True)
-
-    merged = pd.merge_asof(
-        crsp.sort_values("date"),
-        comp.drop(columns=[comp_date_col, "gvkey"]).rename(columns={"avail_date": "date"}).sort_values("date"),
-        on="date",
-        by="permno",
-        direction="backward",
+    # Point-in-time join per permno.  A single merge_asof(..., by="permno") also
+    # requires the ``on`` key to be globally sorted across the whole left frame,
+    # which a multi-stock monthly panel does not satisfy.  Merging each permno
+    # separately avoids that constraint and matches correct PIT semantics.
+    right = (
+        comp.drop(columns=[comp_date_col, "gvkey"], errors="ignore")
+        .rename(columns={"avail_date": "date"})
     )
-    return merged
+    left = crsp.sort_values(["permno", "date"])
+    right = right.sort_values(["permno", "date"])
+    fund_cols = [c for c in right.columns if c not in ("permno", "date")]
+
+    chunks = []
+    for permno, Lg in left.groupby("permno", sort=False):
+        Lg = Lg.sort_values("date")
+        Rg = right.loc[right["permno"] == permno].drop(columns=["permno"]).sort_values("date")
+        if Rg.empty:
+            out = Lg.copy()
+            for c in fund_cols:
+                if c not in out.columns:
+                    out[c] = np.nan
+            chunks.append(out)
+            continue
+        chunks.append(pd.merge_asof(Lg, Rg, on="date", direction="backward"))
+
+    return pd.concat(chunks, ignore_index=True)

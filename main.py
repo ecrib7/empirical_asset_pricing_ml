@@ -135,8 +135,12 @@ def _data_step_fetch(args) -> None:
     loader.get_compustat_annual()
     loader.get_compustat_quarterly()
     loader.get_crsp_compustat_link()
+    allow_macro_stub = os.environ.get("GKX_ALLOW_MACRO_STUB", "").strip().lower() in (
+        "1", "true", "yes",
+    )
     macro = loader.get_macro_predictors(
-        goyal_csv_path=args.goyal_csv if hasattr(args, "goyal_csv") else None
+        goyal_csv_path=args.goyal_csv if hasattr(args, "goyal_csv") else None,
+        allow_macro_stub=allow_macro_stub,
     )
     macro.to_parquet("data/cache/macro.parquet", index=False)
     loader.close()
@@ -234,6 +238,8 @@ def run_evaluate(args) -> dict:
     # Merge all per-model results
     predictions = {}
     portfolio_returns = {}
+    portfolio_returns_gross = {}
+    portfolio_turnover = {}
     metrics = {}
     true_returns = None
     test_dates = None
@@ -244,6 +250,10 @@ def run_evaluate(args) -> dict:
         name = p.stem
         predictions[name] = res["predictions"]
         portfolio_returns[name] = res["portfolio_returns"]
+        if "portfolio_returns_gross" in res:
+            portfolio_returns_gross[name] = res["portfolio_returns_gross"]
+        if "portfolio_turnover" in res:
+            portfolio_turnover[name] = res["portfolio_turnover"]
         metrics[name] = res["metrics"]
         # true_returns / test_dates are identical across models
         if true_returns is None:
@@ -254,6 +264,10 @@ def run_evaluate(args) -> dict:
         f"Loaded results for {len(predictions)} models: "
         f"{list(predictions.keys())}"
     )
+
+    for name in portfolio_returns:
+        portfolio_returns_gross.setdefault(name, portfolio_returns[name])
+        portfolio_turnover.setdefault(name, {})
 
     evaluator = ModelEvaluator(
         y_true=true_returns,
@@ -276,11 +290,34 @@ def run_evaluate(args) -> dict:
     sr_table.to_csv("outputs/sharpe_table.csv")
     dm_matrix.to_csv("outputs/dm_table.csv")
 
-    with open("outputs/metrics.json", "w") as f:
-        json.dump(metrics, f, indent=2, default=str)
+    from src.reporting.portfolio_io import save_portfolio_bundle
 
-    with open("outputs/portfolio_returns.pkl", "wb") as f:
-        pickle.dump(portfolio_returns, f)
+    reporting_meta = {
+        "portfolio_pickle_format": "bundle_v1",
+        "primary_hl_series": "net_of_engine_transaction_costs",
+        "note": (
+            "H-L in bundle['net'] reflects engine TC when tc_bps>0. "
+            "Use bundle['gross'] and per-model hl_sharpe_gross for pre-cost performance."
+        ),
+    }
+    if metrics:
+        sample = next(iter(metrics.values()))
+        reporting_meta["hl_engine_tc_bps_default"] = sample.get("hl_engine_tc_bps", 0.0)
+        reporting_meta["hl_returns_are_net_of_engine_tc"] = bool(
+            sample.get("hl_returns_are_net_of_tc", False)
+        )
+    metrics_out = dict(metrics)
+    metrics_out["_reporting"] = reporting_meta
+
+    with open("outputs/metrics.json", "w") as f:
+        json.dump(metrics_out, f, indent=2, default=str)
+
+    save_portfolio_bundle(
+        "outputs/portfolio_returns.pkl",
+        portfolio_returns,
+        portfolio_returns_gross,
+        portfolio_turnover,
+    )
 
     logger.info("All outputs saved to outputs/")
     return {
@@ -318,8 +355,12 @@ def run_full_pipeline(args) -> dict:
     comp_a = loader.get_compustat_annual()
     comp_q = loader.get_compustat_quarterly()
     link   = loader.get_crsp_compustat_link()
-    macro  = loader.get_macro_predictors(
-        goyal_csv_path=args.goyal_csv if hasattr(args, "goyal_csv") else None
+    allow_macro_stub = os.environ.get("GKX_ALLOW_MACRO_STUB", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+    macro = loader.get_macro_predictors(
+        goyal_csv_path=args.goyal_csv if hasattr(args, "goyal_csv") else None,
+        allow_macro_stub=allow_macro_stub,
     )
     loader.close()
 
@@ -377,8 +418,10 @@ def _run_backtest(
     save_per_model: bool = False,
 ) -> dict:
     from src.models.all_models import get_all_models
-    from src.backtest.engine import BacktestEngine
+    from src.backtest.engine import BacktestEngine, add_forward_return_target
     from src.evaluation.metrics import ModelEvaluator
+
+    feature_matrix = add_forward_return_target(feature_matrix)
 
     # ── 5. Initialise models ────────────────────────────────────────────────
     logger.info("=== Step 5: Initialising models ===")
@@ -419,6 +462,8 @@ def _run_backtest(
                 "test_dates":        results["test_dates"],
                 "test_permnos":      results["test_permnos"],
                 "portfolio_returns": results["portfolio_returns"][name],
+                "portfolio_returns_gross": results["portfolio_returns_gross"][name],
+                "portfolio_turnover": results["portfolio_turnover"][name],
                 "metrics":           results["metrics"][name],
             }
             out_path = model_dir / f"{name}.pkl"
@@ -460,15 +505,25 @@ def _run_backtest(
     sr_table.to_csv("outputs/sharpe_table.csv")
     dm_matrix.to_csv("outputs/dm_table.csv")
 
+    from src.reporting.portfolio_io import save_portfolio_bundle
+
+    metrics_out = dict(results["metrics"])
+    sample = next(iter(metrics_out.values())) if metrics_out else {}
+    metrics_out["_reporting"] = {
+        "portfolio_pickle_format": "bundle_v1",
+        "primary_hl_series": "net_of_engine_transaction_costs",
+        "hl_engine_tc_bps_default": sample.get("hl_engine_tc_bps", 0.0),
+        "hl_returns_are_net_of_engine_tc": bool(sample.get("hl_returns_are_net_of_tc", False)),
+    }
     with open("outputs/metrics.json", "w") as f:
-        json.dump(results["metrics"], f, indent=2, default=str)
+        json.dump(metrics_out, f, indent=2, default=str)
 
-    port_data = {}
-    for model, deciles in results["portfolio_returns"].items():
-        port_data[model] = {k: v.to_dict() for k, v in deciles.items()}
-
-    with open("outputs/portfolio_returns.pkl", "wb") as f:
-        pickle.dump(results["portfolio_returns"], f)
+    save_portfolio_bundle(
+        "outputs/portfolio_returns.pkl",
+        results["portfolio_returns"],
+        results["portfolio_returns_gross"],
+        results["portfolio_turnover"],
+    )
 
     logger.info("Outputs saved to outputs/")
     results["evaluator"]  = evaluator

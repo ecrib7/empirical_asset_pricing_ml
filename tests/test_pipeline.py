@@ -207,7 +207,7 @@ class TestPortfolio:
         from src.backtest.engine import DecilePortfolioBuilder
         pw, rw, mw = self._make_pred_ret()
         b = DecilePortfolioBuilder(n_deciles=5, weighting="value")
-        port = b.build(pw, rw, mw)
+        port, _, _ = b.build(pw, rw, mw)
         assert "H-L" in port
         assert "1" in port
         assert "5" in port
@@ -218,7 +218,7 @@ class TestPortfolio:
         from src.backtest.engine import DecilePortfolioBuilder
         pw, rw, _ = self._make_pred_ret()
         b = DecilePortfolioBuilder(n_deciles=5, weighting="equal")
-        port = b.build(pw, rw)
+        port, _, _ = b.build(pw, rw)
         hl = port["H-L"].dropna()
         assert len(hl) > 0
 
@@ -395,7 +395,7 @@ class TestIntegration:
         pred.index.name = "date"; pred.columns.name = "permno"
 
         b    = DecilePortfolioBuilder(n_deciles=5)
-        port = b.build(pred, ret)
+        port, _, _ = b.build(pred, ret)
         hl   = port["H-L"].dropna()
         assert np.isfinite(hl.values).all()
         sr   = sharpe_ratio(hl)
