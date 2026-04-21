@@ -92,11 +92,22 @@ class OLS3Model:
         self.cols_  = ["mvel1_const", "bm_const", "mom12m_const"]
 
     def fit(self, X: pd.DataFrame, y: np.ndarray, **kwargs) -> "OLS3Model":
+        primary = ["mvel1_const", "bm_const", "mom12m_const"]
+        fallback = ["mvel1", "bm", "mom12m"]
         avail = [c for c in self.cols_ if c in X.columns]
         if not avail:
-            # Fallback: try without suffix
-            self.cols_ = ["mvel1", "bm", "mom12m"]
+            self.cols_ = primary
             avail = [c for c in self.cols_ if c in X.columns]
+        if not avail:
+            self.cols_ = fallback
+            avail = [c for c in self.cols_ if c in X.columns]
+        if not avail:
+            sample_cols = list(X.columns[:10])
+            raise ValueError(
+                "OLS3Model.fit: no required columns found after trying instance "
+                f"``cols_``, then {primary!r}, then {fallback!r}. "
+                f"First 10 columns of X: {sample_cols}"
+            )
         self._avail = avail
         self.model.fit(X[avail].values, y)
         return self
@@ -141,8 +152,9 @@ class ElasticNetModel:
         if X_val is not None:
             Xv = self.scaler_.transform(X_val.values if hasattr(X_val, "values") else X_val)
         else:
-            Xv = Xn[:max(1, int(0.2 * len(Xn)))]
-            y_val = y[:max(1, int(0.2 * len(y)))]
+            n_val = max(1, int(0.2 * len(Xn)))
+            Xv, y_val = Xn[-n_val:], y[-n_val:]
+            Xn, y = Xn[:-n_val], y[:-n_val]
 
         def make_model(alpha):
             return ElasticNet(alpha=alpha, l1_ratio=self.l1_ratio,
@@ -269,27 +281,44 @@ class GLMModel:
         self.alpha_grid = alpha_grid or [1e-4, 1e-3, 1e-2, 5e-2, 0.1]
         self.scaler_   = StandardScaler()
         self.best_model_: Optional[ElasticNet] = None
+        self.knots_: Optional[List[np.ndarray]] = None
+
+    def _fit_spline_knots(self, X: np.ndarray) -> None:
+        """
+        Compute quantile knots per feature from training matrix ``X`` (scaled)
+        and store in ``self.knots_``. Validation/test expansions must use these
+        knots only (no refit on held-out quantiles).
+        """
+        self.knots_ = []
+        for j in range(X.shape[1]):
+            col = X[:, j]
+            self.knots_.append(
+                np.quantile(col, np.linspace(0.1, 0.9, self.n_knots))
+            )
 
     def _spline_expand(self, X: np.ndarray) -> np.ndarray:
-        """Add quadratic spline terms for each feature."""
+        """Add quadratic spline terms using ``self.knots_`` from ``_fit_spline_knots``."""
+        if self.knots_ is None:
+            raise RuntimeError("Call _fit_spline_knots(X_train) before _spline_expand.")
         parts = [X]
         for j in range(X.shape[1]):
             col = X[:, j]
-            knots = np.quantile(col, np.linspace(0.1, 0.9, self.n_knots))
-            for c in knots:
+            for c in self.knots_[j]:
                 parts.append(np.maximum(col - c, 0).reshape(-1, 1) ** 2)
         return np.hstack(parts)
 
     def fit(self, X, y, X_val=None, y_val=None) -> "GLMModel":
         Xn = self.scaler_.fit_transform(X.values if hasattr(X, "values") else X)
-        Xs = self._spline_expand(Xn)
         if X_val is None:
-            n_val = max(1, int(0.2 * len(Xs)))
-            Xs_val, y_val = Xs[-n_val:], y[-n_val:]
-            Xs, y = Xs[:-n_val], y[:-n_val]
+            n_val = max(1, int(0.2 * len(Xn)))
+            Xv_n, y_val = Xn[-n_val:], y[-n_val:]
+            Xn, y = Xn[:-n_val], y[:-n_val]
         else:
-            Xv = self.scaler_.transform(X_val.values if hasattr(X_val, "values") else X_val)
-            Xs_val = self._spline_expand(Xv)
+            Xv_n = self.scaler_.transform(X_val.values if hasattr(X_val, "values") else X_val)
+
+        self._fit_spline_knots(Xn)
+        Xs = self._spline_expand(Xn)
+        Xs_val = self._spline_expand(Xv_n)
 
         best_r2 = -np.inf
         for alpha in self.alpha_grid:
@@ -398,15 +427,27 @@ class GBRTModel:
         else:
             X_val = X_val.values if hasattr(X_val, "values") else X_val
 
+        def _make_gbrt(**kwargs) -> GradientBoostingRegressor:
+            try:
+                return GradientBoostingRegressor(loss="huber", **kwargs)
+            except TypeError as e:
+                logger.warning(
+                    "GradientBoostingRegressor loss='huber' unsupported (%s); "
+                    "using loss='squared_error'.",
+                    e,
+                )
+                return GradientBoostingRegressor(loss="squared_error", **kwargs)
+
         best_r2 = -np.inf
         for n in self.n_estimators_grid:
             for d in self.max_depth_grid:
                 for lr in self.learning_rate_grid:
-                    m = GradientBoostingRegressor(
-                        n_estimators=n, max_depth=d,
-                        learning_rate=lr, subsample=0.5,
+                    m = _make_gbrt(
+                        n_estimators=n,
+                        max_depth=d,
+                        learning_rate=lr,
+                        subsample=0.5,
                         random_state=self.random_state,
-                        loss="huber",  # Huber loss
                     )
                     m.fit(Xn, y)
                     r2 = oos_r2(y_val, m.predict(X_val))
@@ -414,9 +455,11 @@ class GBRTModel:
                         best_r2 = r2
                         self.best_model_ = m
         if self.best_model_ is None:
-            self.best_model_ = GradientBoostingRegressor(
-                n_estimators=300, max_depth=1, learning_rate=0.01,
-                random_state=self.random_state, loss="huber"
+            self.best_model_ = _make_gbrt(
+                n_estimators=300,
+                max_depth=1,
+                learning_rate=0.01,
+                random_state=self.random_state,
             ).fit(Xn, y)
         return self
 
@@ -440,6 +483,21 @@ try:
 except ImportError:
     HAS_TORCH = False
     logger.warning("PyTorch not installed. Neural network models unavailable.")
+
+
+if HAS_TORCH:
+
+    class HuberLoss(nn.Module):
+        """Huber loss for monthly returns (GKX-style robust objective)."""
+
+        def __init__(self, delta: float = 0.001) -> None:
+            super().__init__()
+            self.delta = delta
+
+        def forward(self, pred: "torch.Tensor", target: "torch.Tensor") -> "torch.Tensor":
+            return nn.functional.huber_loss(
+                pred, target, reduction="mean", delta=self.delta
+            )
 
 
 class _FeedForwardNet(nn.Module if HAS_TORCH else object):
@@ -540,6 +598,7 @@ class NeuralNetModel:
             net = _FeedForwardNet(input_dim, self.hidden_dims).to(dev)
             opt = optim.Adam(net.parameters(), lr=self.learning_rate)
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, patience=2, factor=0.5)
+            huber = HuberLoss(delta=0.001)
 
             ds  = TensorDataset(
                 torch.from_numpy(Xn).to(dev),
@@ -559,7 +618,7 @@ class NeuralNetModel:
                 for xb, yb in dl:
                     opt.zero_grad()
                     pred = net(xb)
-                    loss = nn.MSELoss()(pred, yb)
+                    loss = huber(pred, yb)
                     # L1 regularisation
                     l1 = sum(p.abs().sum() for p in net.parameters())
                     (loss + self.l1_lambda * l1).backward()
@@ -568,7 +627,7 @@ class NeuralNetModel:
                 # Validation loss
                 net.eval()
                 with torch.no_grad():
-                    val_loss = nn.MSELoss()(net(Xv_t), yv_t).item()
+                    val_loss = huber(net(Xv_t), yv_t).item()
                 scheduler.step(val_loss)
 
                 if val_loss < best_val_loss:
