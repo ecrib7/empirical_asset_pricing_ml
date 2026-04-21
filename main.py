@@ -5,6 +5,9 @@ Entry-point for the GKX (2019) replication pipeline.
 
 Usage
 -----
+    # YAML experiment scaffold (no data pull; returns stub dict):
+    python main.py --config configs/experiment.yaml
+
     # Full pipeline (requires WRDS credentials):
     python main.py --mode full --wrds-username your_username
 
@@ -542,6 +545,11 @@ def parse_args():
         description="GKX (2019) Empirical Asset Pricing via Machine Learning"
     )
     parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to YAML experiment config (stub: loads via RunSimulation; see configs/experiment.yaml)",
+    )
+    parser.add_argument(
         "--mode",
         choices=["full", "test", "cache", "dashboard",
                  "data-only", "train", "evaluate"],
@@ -580,6 +588,14 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    if args.config:
+        from src.backtest.simulator import RunSimulation
+
+        sim = RunSimulation(args.config)
+        out = sim.run()
+        logger.info("Config-driven stub result: %s", out)
+        return out
 
     if args.mode == "full":
         results = run_full_pipeline(args)

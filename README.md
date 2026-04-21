@@ -1,33 +1,7 @@
 # GKX (2019) — Empirical Asset Pricing via Machine Learning
 ### IEOR 4733: Algorithmic Trading — Course Project
 
-Replication of **Gu, Kelly & Xiu (2019)**, NBER Working Paper 25398.
-
----
-
-## Project Structure
-
-```
-ml_asset_pricing/
-├── main.py                       # Entry-point: CLI pipeline runner
-├── requirements.txt
-├── src/
-│   ├── config.py                 # All hyper-parameters & sample dates
-│   ├── data/
-│   │   ├── wrds_loader.py        # WRDS → CRSP + Compustat + Macro
-│   │   └── characteristics.py   # 94 firm characteristics + feature matrix
-│   ├── models/
-│   │   └── all_models.py         # OLS-3, ENet, PCR, PLS, GLM, RF, GBRT, NN1-NN5
-│   ├── backtest/
-│   │   └── engine.py             # Recursive backtest + TC model + portfolio builder
-│   ├── evaluation/
-│   │   └── metrics.py            # OOS R², DM tests, Sharpe ratios
-│   └── dashboard/
-│       └── app.py                # Streamlit interactive dashboard
-├── data/cache/                   # Auto-generated Parquet caches
-├── outputs/                      # Results: CSVs, pickles, metrics JSON
-└── logs/                         # Pipeline logs
-```
+This repository implements a **reproduction and extension** of **Gu, Kelly & Xiu (2019)** (*Empirical Asset Pricing via Machine Learning*, RFS): monthly panels, machine-learning return forecasts, recursive out-of-sample evaluation, long–short decile portfolios, and economic significance metrics. It also includes **stub modules** for a modular trading-system layout (YAML-driven experiments, walk-forward engine scaffold, and split `models` / `portfolio` packages) alongside the original GKX pipeline.
 
 ---
 
@@ -39,7 +13,64 @@ ml_asset_pricing/
 pip install -r requirements.txt
 ```
 
-### 2. WRDS credentials
+### 2. Run with experiment config (stub)
+
+Loads `configs/experiment.yaml` and returns a placeholder result dict (full wiring TBD):
+
+```bash
+python main.py --config configs/experiment.yaml
+```
+
+---
+
+## Project structure
+
+```
+empirical_asset_pricing_ml/
+├── main.py                    # CLI: GKX modes + --config YAML stub
+├── requirements.txt
+├── configs/
+│   └── experiment.yaml        # Universe, splits, models, costs, portfolio defaults
+├── src/
+│   ├── config.py
+│   ├── data/
+│   │   ├── wrds_loader.py
+│   │   └── characteristics.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── base.py            # ModelBase (ABC)
+│   │   ├── ols.py             # OLS-3 stub
+│   │   ├── elastic_net.py
+│   │   ├── pls.py
+│   │   ├── random_forest.py
+│   │   ├── gbrt.py
+│   │   ├── mlp.py
+│   │   └── all_models.py      # Legacy GKX estimators (production)
+│   ├── portfolio/
+│   │   ├── __init__.py
+│   │   ├── construction.py    # Decile / L–S weights (stub)
+│   │   ├── costs.py           # Commission + spread + impact (stub)
+│   │   └── turnover.py
+│   ├── backtest/
+│   │   ├── __init__.py
+│   │   ├── engine.py          # GKX decile backtest + TC (production)
+│   │   ├── walkforward_engine.py  # Walk-forward scaffold (deliverable)
+│   │   └── simulator.py       # YAML end-to-end driver (stub)
+│   ├── evaluation/
+│   │   └── metrics.py
+│   ├── reporting/
+│   └── dashboard/
+│       └── app.py
+├── data/cache/
+├── outputs/
+└── logs/
+```
+
+---
+
+## WRDS and legacy GKX CLI
+
+### 1. WRDS credentials
 
 ```bash
 # One-time setup — saves credentials to ~/.pgpass
@@ -49,7 +80,7 @@ python -c "import wrds; wrds.Connection()"
 export WRDS_USERNAME=your_wrds_username
 ```
 
-### 3. Goyal & Welch macro data
+### 2. Goyal & Welch macro data
 
 Download `PredictorData2023.xlsx` from:
 https://sites.google.com/view/agoyal145

@@ -13,6 +13,8 @@ Statistical and economic evaluation tools from GKX (2019):
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -167,9 +169,26 @@ def variable_importance_r2(
     feature_names: List[str],
 ) -> pd.Series:
     """
-    GKX (2019) variable importance: reduction in OOS R² when
-    predictor j is set to zero (holding other estimates fixed).
+    GKX (2019) variable importance: reduction in OOS R² when predictor j
+    is set to zero (holding other estimates fixed).
+
+    IMPORTANT: This method sets each feature to 0.0 as the perturbation.
+    This is only meaningful if features are cross-sectionally rank-normalised
+    to the interval [-1, 1] (as in GKX), so that 0.0 corresponds to the
+    cross-sectional median. If features are not normalised, importances
+    will be distorted. Ensure normalisation is applied before calling this.
     """
+    present = [c for c in feature_names if c in X.columns]
+    if present:
+        feature_means = X[present].mean()
+        if (feature_means.abs() > 0.5).any():
+            warnings.warn(
+                "variable_importance_r2: some features have |mean| > 0.5. "
+                "Features may not be cross-sectionally normalised. "
+                "Importances computed by zeroing features may be unreliable.",
+                stacklevel=2,
+            )
+
     baseline = oos_r2(y, model.predict(X))
     importances = {}
     for col in feature_names:

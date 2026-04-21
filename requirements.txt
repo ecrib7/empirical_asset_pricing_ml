@@ -1,5 +1,8 @@
 # Python 3.8 — all versions below have pre-built wheels for cp38-win_amd64
 
+# Experiment configs (YAML)
+pyyaml>=6.0.1,<7.0.0
+
 # Core scientific stack
 numpy>=1.24.0,<2.0.0
 pandas>=2.0.0,<2.2.0

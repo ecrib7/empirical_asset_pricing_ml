@@ -1,0 +1,34 @@
+universe:
+  start_date: "1987-01-01"
+  end_date: "2016-12-31"
+  min_price: 5.0
+  min_me_pct: 20  # exclude bottom 20% by market cap (NYSE breakpoints)
+
+split:
+  train_start: "1957-01-01"
+  validation_start: "1987-01-01"
+  test_start: "2005-01-01"
+
+models:
+  - name: ols3
+    enabled: true
+  - name: elastic_net
+    enabled: true
+  - name: gbrt
+    enabled: true
+  - name: random_forest
+    enabled: false
+  - name: mlp
+    enabled: false
+
+costs:
+  commission_bps: 5
+  half_spread_bps: 10
+  market_impact_bps: 20
+
+rebalance_frequency: monthly
+
+portfolio:
+  n_deciles: 10
+  long_short: true
+  value_weighted: true

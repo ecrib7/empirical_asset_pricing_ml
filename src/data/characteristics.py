@@ -44,6 +44,15 @@ def _cs_rank(s: pd.Series) -> pd.Series:
     return 2 * (r - 1) / (n - 1) - 1
 
 
+def _groupby_permno_apply(df: pd.DataFrame, func):
+    """Apply ``func(g)`` per ``permno``; use ``include_groups=False`` when available (pandas ≥2.2)."""
+    gb = df.groupby("permno", sort=False, group_keys=False)
+    try:
+        return gb.apply(func, include_groups=False)
+    except TypeError:
+        return gb.apply(func)
+
+
 def _winsorise(s: pd.Series, p: float = 0.01) -> pd.Series:
     lo, hi = s.quantile(p), s.quantile(1 - p)
     return s.clip(lower=lo, upper=hi)
@@ -91,10 +100,19 @@ class MomentumBuilder:
         return m6 - m6.shift(6)
 
     @staticmethod
-    def maxret(ret: pd.Series) -> pd.Series:
-        """Maximum daily return in past month (approximated by monthly return)."""
-        # Proper implementation requires daily data; use abs(ret) as proxy
-        return ret.rolling(1).max()
+    def maxret(daily_ret: Optional[pd.Series] = None) -> pd.Series:
+        """
+        Maximum daily return in the past month (GKX 2019).
+        Requires a daily return series aggregated to monthly frequency
+        by taking the max within each calendar month.
+
+        If only monthly data is available, set this to NaN and exclude
+        from the feature set — do NOT use monthly ret as a proxy.
+        """
+        if daily_ret is None:
+            # ``daily_ret.index`` is undefined here; placeholder until daily CRSP is wired.
+            return pd.Series(np.nan, dtype=float)
+        return daily_ret  # caller must pass monthly-max-of-daily already aggregated
 
     @staticmethod
     def indmom(ret: pd.Series, sic: pd.Series) -> pd.Series:
@@ -103,7 +121,12 @@ class MomentumBuilder:
         2-digit SIC industry, lagged 1 month.
         Computed cross-sectionally each month.
         """
-        # Placeholder – computed in CharacteristicsBuilder where panel is available
+        warnings.warn(
+            "MomentumBuilder.indmom() is a placeholder. "
+            "Industry momentum must be computed at panel level using "
+            "IndustryBuilder.indmom_panel(). This column will be all NaN.",
+            stacklevel=2,
+        )
         return pd.Series(np.nan, index=ret.index)
 
 
@@ -138,7 +161,16 @@ class LiquidityBuilder:
 
     @staticmethod
     def ill(ret: pd.Series, dolvol: pd.Series) -> pd.Series:
-        """Amihud (2002) illiquidity = |ret| / dollar_volume."""
+        """
+        Amihud (2002) illiquidity = |ret| / dollar_volume.
+
+        Parameters
+        ----------
+        ret    : monthly return series
+        dolvol : log dollar volume series (i.e., output of LiquidityBuilder.dolvol).
+                 This function internally calls np.exp(dolvol) to recover the level.
+                 Do NOT pass raw dollar volume — pass the log.
+        """
         dv = np.exp(dolvol).replace(0, np.nan)
         return (ret.abs() / dv).rolling(12, min_periods=8).mean() * 1e6
 
@@ -167,7 +199,12 @@ class LiquidityBuilder:
         Approximated as 1 - R²(restricted) / R²(full) from rolling OLS.
         Full implementation requires per-stock regression.
         """
-        # Placeholder – computed per-stock in full pipeline
+        warnings.warn(
+            "LiquidityBuilder.pricedelay() is a placeholder. "
+            "Price delay requires per-stock rolling OLS regression on lagged "
+            "market returns and is not yet implemented. This column will be all NaN.",
+            stacklevel=2,
+        )
         return pd.Series(np.nan, index=ret.index)
 
 
@@ -214,9 +251,11 @@ class AccrualsBuilder:
         Working capital accruals (Sloan 1996).
         acc = (ΔCA - ΔCash - ΔCL + ΔDebt_ST - Dep) / avg_Assets
         """
-        dact = df["act"].diff() - df.get("cheq", df.get("che", 0)).fillna(0).diff()
-        dlct = df["lct"].diff() - df.get("dlcq", df.get("dlc", 0)).fillna(0).diff()
-        dep  = df["depr_a"].fillna(0)
+        cash = df.get("cheq", df.get("che", pd.Series(np.nan, index=df.index)))
+        d_st = df.get("dlcq", df.get("dlc", pd.Series(np.nan, index=df.index)))
+        dact = df["act"].diff() - cash.diff()
+        dlct = df["lct"].diff() - d_st.diff()
+        dep = df["depr_a"]
         avg_at = (df["at"] + df["at"].shift(1)) / 2
         return (dact - dlct - dep) / avg_at.replace(0, np.nan)
 
@@ -252,16 +291,16 @@ class FundamentalsBuilder:
         # Stockholders' equity (preferred order: seq, then ceq+pstk, then at-lt)
         se = df.get("seq", pd.Series(np.nan, index=df.index)).fillna(
              df.get("ceq", pd.Series(np.nan, index=df.index))
-             + df.get("pstk", pd.Series(0.0, index=df.index)).fillna(0))
+             + df.get("pstk", pd.Series(np.nan, index=df.index)))
         se = se.fillna(df["at"] - df["lt"])
 
         # Deferred taxes
-        txditc = df.get("txditc", pd.Series(0.0, index=df.index)).fillna(0)
+        txditc = df.get("txditc", pd.Series(np.nan, index=df.index))
 
         # Preferred stock (use redemption value first, then liquidation, then carrying)
         ps = df.get("pstkrv", pd.Series(np.nan, index=df.index))
         ps = ps.fillna(df.get("pstkl", pd.Series(np.nan, index=df.index)))
-        ps = ps.fillna(df.get("pstk", pd.Series(0.0, index=df.index))).fillna(0)
+        ps = ps.fillna(df.get("pstk", pd.Series(np.nan, index=df.index)))
 
         return se + txditc - ps
 
@@ -290,14 +329,15 @@ class FundamentalsBuilder:
     def cfp(df: pd.DataFrame) -> pd.Series:
         """Cash flow to price."""
         cf = df.get("ibq", df.get("ib", pd.Series(np.nan, index=df.index))) \
-           + df.get("dp", df.get("depr_a", pd.Series(0.0, index=df.index))).fillna(0)
+           + df.get("dp", df.get("depr_a", pd.Series(np.nan, index=df.index)))
         me = df.get("me", pd.Series(np.nan, index=df.index)).replace(0, np.nan)
         return cf / me
 
     @staticmethod
     def dy(df: pd.DataFrame) -> pd.Series:
         """Dividend yield."""
-        div = df.get("dvc", pd.Series(0.0, index=df.index)).fillna(0)
+        # Missing common dividends (dvc) are treated as zero cash payout.
+        div = df.get("dvc", pd.Series(np.nan, index=df.index)).fillna(0)
         me  = df.get("me", pd.Series(np.nan, index=df.index)).replace(0, np.nan)
         return div / me
 
@@ -309,15 +349,15 @@ class FundamentalsBuilder:
     @staticmethod
     def invest(df: pd.DataFrame) -> pd.Series:
         """Capital expenditures and inventory growth."""
-        capx = df.get("capx", pd.Series(0.0, index=df.index)).fillna(0)
-        dinv = df.get("invt", pd.Series(0.0, index=df.index)).diff().fillna(0)
+        capx = df.get("capx", pd.Series(np.nan, index=df.index))
+        dinv = df.get("invt", pd.Series(np.nan, index=df.index)).diff()
         at_l = df["at"].shift(1).replace(0, np.nan)
         return (capx + dinv) / at_l
 
     @staticmethod
     def lev(df: pd.DataFrame) -> pd.Series:
         """Leverage = long-term debt / market equity."""
-        dltt = df.get("dltt", pd.Series(0.0, index=df.index)).fillna(0)
+        dltt = df.get("dltt", pd.Series(np.nan, index=df.index))
         me   = df.get("me", pd.Series(np.nan, index=df.index)).replace(0, np.nan)
         return dltt / me
 
@@ -326,8 +366,8 @@ class FundamentalsBuilder:
         """Operating profitability (Fama & French 2015)."""
         revt = df.get("revt", df.get("sale", pd.Series(np.nan, index=df.index)))
         cogs = df.get("cogs", pd.Series(0.0, index=df.index)).fillna(0)
-        xsga = df.get("xsga", pd.Series(0.0, index=df.index)).fillna(0)
-        xint = df.get("xint", pd.Series(0.0, index=df.index)).fillna(0)
+        xsga = df.get("xsga", pd.Series(np.nan, index=df.index))
+        xint = df.get("xint", pd.Series(np.nan, index=df.index))
         be   = FundamentalsBuilder._book_equity(df).replace(0, np.nan)
         return (revt - cogs - xsga - xint) / be
 
@@ -357,7 +397,7 @@ class FundamentalsBuilder:
     @staticmethod
     def rd_mve(df: pd.DataFrame) -> pd.Series:
         """R&D to market capitalisation."""
-        xrd = df.get("xrd", pd.Series(0.0, index=df.index)).fillna(0)
+        xrd = df.get("xrd", pd.Series(np.nan, index=df.index))
         me  = df.get("me", pd.Series(np.nan, index=df.index)).replace(0, np.nan)
         return xrd / me
 
@@ -365,16 +405,16 @@ class FundamentalsBuilder:
     def cashdebt(df: pd.DataFrame) -> pd.Series:
         """Cash flow to debt."""
         cf  = df.get("ibq", df.get("ib", pd.Series(np.nan, index=df.index))) \
-            + df.get("dp", df.get("depr_a", pd.Series(0.0, index=df.index))).fillna(0)
-        dltt = df.get("dltt", pd.Series(0.0, index=df.index)).fillna(0)
-        dlc  = df.get("dlc", pd.Series(0.0, index=df.index)).fillna(0)
+            + df.get("dp", df.get("depr_a", pd.Series(np.nan, index=df.index)))
+        dltt = df.get("dltt", pd.Series(np.nan, index=df.index))
+        dlc  = df.get("dlc", pd.Series(np.nan, index=df.index))
         debt = (dltt + dlc).replace(0, np.nan)
         return cf / debt
 
     @staticmethod
     def chinv(df: pd.DataFrame) -> pd.Series:
         """Change in inventory scaled by sales."""
-        dinv = df.get("invt", pd.Series(0.0, index=df.index)).diff()
+        dinv = df.get("invt", pd.Series(np.nan, index=df.index)).diff()
         sale = df.get("sale", pd.Series(np.nan, index=df.index)).replace(0, np.nan)
         return dinv / sale
 
@@ -409,7 +449,7 @@ class FundamentalsBuilder:
     def cashpr(df: pd.DataFrame) -> pd.Series:
         """Cash productivity: (me + dltt - at) / cheq."""
         me   = df.get("me", pd.Series(np.nan, index=df.index))
-        dltt = df.get("dltt", pd.Series(0.0, index=df.index)).fillna(0)
+        dltt = df.get("dltt", pd.Series(np.nan, index=df.index))
         at   = df["at"]
         che  = df.get("cheq", df.get("che", pd.Series(np.nan, index=df.index))).replace(0, np.nan)
         return (me + dltt - at) / che
@@ -417,12 +457,12 @@ class FundamentalsBuilder:
     @staticmethod
     def convind(df: pd.DataFrame) -> pd.Series:
         """Convertible debt indicator."""
-        return (df.get("dcvt", pd.Series(0.0, index=df.index)).fillna(0) > 0).astype(float)
+        return (df.get("dcvt", pd.Series(np.nan, index=df.index)) > 0).astype(float)
 
     @staticmethod
     def securedind(df: pd.DataFrame) -> pd.Series:
         """Secured debt indicator."""
-        return (df.get("dm", df.get("secured", pd.Series(np.nan, index=df.index))).fillna(0) > 0).astype(float)
+        return (df.get("dm", df.get("secured", pd.Series(np.nan, index=df.index))) > 0).astype(float)
 
     @staticmethod
     def roeq(df: pd.DataFrame) -> pd.Series:
@@ -441,7 +481,7 @@ class FundamentalsBuilder:
     @staticmethod
     def orgcap(df: pd.DataFrame) -> pd.Series:
         """Organizational capital (Eisfeldt & Papanikolaou 2013)."""
-        xsga = df.get("xsga", pd.Series(0.0, index=df.index)).fillna(0)
+        xsga = df.get("xsga", pd.Series(np.nan, index=df.index))
         at   = df["at"].replace(0, np.nan)
         return xsga / at * 5   # simplified: 5× SG&A / assets
 
@@ -496,89 +536,120 @@ class CharacteristicsBuilder:
         self.mkt_ret = mkt_ret
 
     def build(self) -> pd.DataFrame:
-        df = self.panel
+        # Vectorised implementation — avoids explicit Python loop for performance on large panels
+        df = self.panel.copy()
 
         # ── Market equity at previous month-end (used by many characteristics)
-        df["me_lag1"] = df.groupby("permno")["me"].shift(1)
+        df["me_lag1"] = df.groupby("permno", sort=False)["me"].shift(1)
 
         # ── Merge market return
         df = df.merge(self.mkt_ret.rename("mkt_ret").reset_index(), on="date", how="left")
+        df = df.sort_values(["permno", "date"], kind="mergesort").reset_index(drop=True)
 
-        # Per-stock computations
-        results = []
-        for permno, g in df.groupby("permno"):
-            g = g.sort_values("date").copy()
+        _has_baspread = "bid" in df.columns and "ask" in df.columns
+        if not _has_baspread:
+            import logging
 
-            # ─ Momentum ─
-            g["mom1m"]  = g["ret"]
-            g["mom6m"]  = MomentumBuilder.mom6m(g["ret"])
-            g["mom12m"] = MomentumBuilder.mom12m(g["ret"])
-            g["mom36m"] = MomentumBuilder.mom36m(g["ret"])
-            g["chmom"]  = MomentumBuilder.chmom(g["ret"])
-            g["maxret"] = g["ret"].rolling(1).max()
+            logging.getLogger(__name__).warning(
+                "baspread: 'bid' and 'ask' columns not found in panel. "
+                "baspread will be NaN for all observations."
+            )
 
-            # ─ Liquidity ─
-            g["mvel1"]    = LiquidityBuilder.mvel1(g["prc"], g["shrout"])
-            g["dolvol"]   = LiquidityBuilder.dolvol(g["prc"], g["vol"])
-            g["turn"]     = LiquidityBuilder.turn(g["vol"], g["shrout"])
-            g["std_turn"] = LiquidityBuilder.std_turn(g["vol"], g["shrout"])
-            g["ill"]      = LiquidityBuilder.ill(g["ret"], g["dolvol"])
-            g["zerotrade"]= LiquidityBuilder.zerotrade(g["vol"])
-            if "bid" in g.columns and "ask" in g.columns:
-                g["baspread"] = LiquidityBuilder.baspread(g["bid"], g["ask"], g["prc"])
+        _gp = df.groupby("permno", sort=False)
+
+        # ─ Momentum (per-stock rolling via transform) ─
+        df["mom1m"] = df["ret"]
+        df["mom6m"] = _gp["ret"].transform(lambda s: MomentumBuilder.mom6m(s))
+        df["mom12m"] = _gp["ret"].transform(lambda s: MomentumBuilder.mom12m(s))
+        df["mom36m"] = _gp["ret"].transform(lambda s: MomentumBuilder.mom36m(s))
+        df["chmom"] = _gp["ret"].transform(lambda s: MomentumBuilder.chmom(s))
+        # TODO: pass pre-aggregated daily max returns from daily CRSP pull
+        df["maxret"] = np.nan  # requires daily CRSP — see MomentumBuilder.maxret
+
+        # ─ Liquidity (vectorised rolling within permno; mvel1 is cross-sectional) ─
+        df["mvel1"] = LiquidityBuilder.mvel1(df["prc"], df["shrout"])
+        _dv = (df["prc"] * df["vol"] * 1000).clip(lower=1e-6)
+        df["dolvol"] = _dv.groupby(df["permno"], sort=False).transform(
+            lambda s: np.log(s.rolling(12, min_periods=8).mean())
+        )
+        _tvr = df["vol"] / df["shrout"].replace(0, np.nan)
+        df["turn"] = _tvr.groupby(df["permno"], sort=False).transform(
+            lambda s: s.rolling(12, min_periods=8).mean()
+        )
+        df["std_turn"] = _tvr.groupby(df["permno"], sort=False).transform(
+            lambda s: s.rolling(12, min_periods=8).std()
+        )
+        _dv_level = np.exp(df["dolvol"]).replace(0, np.nan)
+        df["ill"] = (
+            (df["ret"].abs() / _dv_level)
+            .groupby(df["permno"], sort=False)
+            .transform(lambda s: s.rolling(12, min_periods=8).mean())
+            * 1e6
+        )
+        df["zerotrade"] = (
+            (df["vol"] == 0)
+            .astype(float)
+            .groupby(df["permno"], sort=False)
+            .transform(lambda s: s.rolling(12, min_periods=8).sum())
+        )
+        if _has_baspread:
+            _spread = (df["ask"] - df["bid"]) / df["prc"].replace(0, np.nan)
+            df["baspread"] = _spread.groupby(df["permno"], sort=False).transform(
+                lambda s: s.rolling(12, min_periods=8).mean()
+            )
+        else:
+            df["baspread"] = np.nan
+        _ldv = np.log((df["prc"] * df["vol"] * 1000).clip(lower=1e-6))
+        df["std_dolvol"] = _ldv.groupby(df["permno"], sort=False).transform(
+            lambda s: s.rolling(12, min_periods=8).std()
+        )
+
+        # ─ Risk (beta / idiovol need ret + mkt_ret per permno) ─
+        df["beta"] = _groupby_permno_apply(df, lambda g: RiskBuilder.beta(g["ret"], g["mkt_ret"]))
+        df["betasq"] = _groupby_permno_apply(df, lambda g: RiskBuilder.betasq(g["ret"], g["mkt_ret"]))
+        df["retvol"] = _gp["ret"].transform(lambda s: RiskBuilder.retvol(s))
+        df["idiovol"] = _groupby_permno_apply(df, lambda g: RiskBuilder.idiovol(g["ret"], g["mkt_ret"]))
+
+        # ─ Accounting (if Compustat data merged in) ─
+        if "at" in df.columns:
+            df["agr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.agr(g))
+            df["invest"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.invest(g))
+            df["lev"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.lev(g))
+            df["bm"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.bm(g))
+            df["ep"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.ep(g))
+            df["sp"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.sp(g))
+            df["cfp"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.cfp(g))
+            df["dy"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.dy(g))
+            df["operprof"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.operprof(g))
+            df["gma"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.gma(g))
+            df["acc"] = _groupby_permno_apply(df, lambda g: AccrualsBuilder.acc(g))
+            df["pctacc"] = _groupby_permno_apply(df, lambda g: AccrualsBuilder.pctacc(g))
+            df["absacc"] = _groupby_permno_apply(df, lambda g: AccrualsBuilder.absacc(g))
+            df["chcsho"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.chcsho(g))
+            df["nincr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.nincr(g))
+            df["rd_mve"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.rd_mve(g))
+            df["cashdebt"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.cashdebt(g))
+            df["chinv"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.chinv(g))
+            df["lgr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.lgr(g))
+            df["egr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.egr(g))
+            df["sgr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.sgr(g))
+            df["depr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.depr(g))
+            df["cashpr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.cashpr(g))
+            df["convind"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.convind(g))
+            df["securedind"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.securedind(g))
+            df["roeq"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.roeq(g))
+            df["roaq"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.roaq(g))
+            df["orgcap"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.orgcap(g))
+            df["rd_sale"] = (
+                df.get("xrd", pd.Series(0.0, index=df.index)).fillna(0)
+                / df.get("sale", pd.Series(np.nan, index=df.index)).replace(0, np.nan)
+            )
+            if "datadate" in df.columns:
+                _min_dd = df.groupby("permno", sort=False)["datadate"].transform("min")
+                df["age"] = df["date"].dt.year - _min_dd.dt.year
+                df.loc[_min_dd.isna(), "age"] = np.nan
             else:
-                g["baspread"] = np.nan
-            g["std_dolvol"] = LiquidityBuilder.std_dolvol(g["prc"], g["vol"])
-
-            # ─ Risk ─
-            g["beta"]    = RiskBuilder.beta(g["ret"], g["mkt_ret"])
-            g["betasq"]  = RiskBuilder.betasq(g["ret"], g["mkt_ret"])
-            g["retvol"]  = RiskBuilder.retvol(g["ret"])
-            g["idiovol"] = RiskBuilder.idiovol(g["ret"], g["mkt_ret"])
-
-            # ─ Accounting (if Compustat data merged in)
-            if "at" in g.columns:
-                g["agr"]     = FundamentalsBuilder.agr(g)
-                g["invest"]  = FundamentalsBuilder.invest(g)
-                g["lev"]     = FundamentalsBuilder.lev(g)
-                g["bm"]      = FundamentalsBuilder.bm(g)
-                g["ep"]      = FundamentalsBuilder.ep(g)
-                g["sp"]      = FundamentalsBuilder.sp(g)
-                g["cfp"]     = FundamentalsBuilder.cfp(g)
-                g["dy"]      = FundamentalsBuilder.dy(g)
-                g["operprof"]= FundamentalsBuilder.operprof(g)
-                g["gma"]     = FundamentalsBuilder.gma(g)
-                g["acc"]     = AccrualsBuilder.acc(g)
-                g["pctacc"]  = AccrualsBuilder.pctacc(g)
-                g["absacc"]  = AccrualsBuilder.absacc(g)
-                g["chcsho"]  = FundamentalsBuilder.chcsho(g)
-                g["nincr"]   = FundamentalsBuilder.nincr(g)
-                g["rd_mve"]  = FundamentalsBuilder.rd_mve(g)
-                g["cashdebt"]= FundamentalsBuilder.cashdebt(g)
-                g["chinv"]   = FundamentalsBuilder.chinv(g)
-                g["lgr"]     = FundamentalsBuilder.lgr(g)
-                g["egr"]     = FundamentalsBuilder.egr(g)
-                g["sgr"]     = FundamentalsBuilder.sgr(g)
-                g["depr"]    = FundamentalsBuilder.depr(g)
-                g["cashpr"]  = FundamentalsBuilder.cashpr(g)
-                g["convind"] = FundamentalsBuilder.convind(g)
-                g["securedind"] = FundamentalsBuilder.securedind(g)
-                g["roeq"]    = FundamentalsBuilder.roeq(g)
-                g["roaq"]    = FundamentalsBuilder.roaq(g)
-                g["orgcap"]  = FundamentalsBuilder.orgcap(g)
-                g["rd_sale"] = (g.get("xrd", pd.Series(0.0, index=g.index)).fillna(0)
-                                / g.get("sale", pd.Series(np.nan, index=g.index)).replace(0, np.nan))
-
-                # Age: years since first Compustat appearance
-                first_year = g["datadate"].min().year if "datadate" in g.columns else None
-                if first_year:
-                    g["age"] = g["date"].dt.year - first_year
-                else:
-                    g["age"] = np.nan
-
-            results.append(g)
-
-        df = pd.concat(results, ignore_index=True)
+                df["age"] = np.nan
 
         # ── Industry momentum (requires cross-section, computed here) ──
         df["indmom"] = IndustryBuilder.indmom_panel(df)
