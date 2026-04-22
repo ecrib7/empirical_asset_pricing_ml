@@ -372,7 +372,8 @@ class MarketTimer:
 
         # Scale signal to [0, max_leverage] (long-only)
         # Following C-T: weight proportional to prediction
-        w = pred / pred.std()
+        sig = float(pred.std())
+        w = pred / max(sig, 1e-8)
         w = w.clip(lower=0.0, upper=self.max_leverage)
 
         timed = w * real + (1 - w) * rf
@@ -473,6 +474,12 @@ class BacktestEngine:
             fm, target_col, id_col=id_col, date_col=date_col, me_col=me_col
         )
 
+        first_train_end = self.test_start - pd.DateOffset(years=1)
+        assert first_train_end.year == self.val_end.year, (
+            f"val_end year {self.val_end.year} does not match "
+            f"first walk-forward train_end year {first_train_end.year}"
+        )
+
         all_test_dates = pd.date_range(self.test_start, self.test_end, freq=FREQ_YEAR_START)
         predictions    = {name: [] for name in models}
         true_rets      = []
@@ -496,12 +503,12 @@ class BacktestEngine:
             if len(train) < 100 or len(test) == 0:
                 continue
 
-            X_train = train[feat_cols].fillna(0).values
+            X_tr = train[feat_cols].fillna(0)
+            X_v = val[feat_cols].fillna(0) if len(val) > 0 else None
+            X_te = test[feat_cols].fillna(0)
             y_train = train[target_col].values
-            X_val   = val[feat_cols].fillna(0).values if len(val) > 0 else None
-            y_val   = val[target_col].values if len(val) > 0 else None
-            X_test  = test[feat_cols].fillna(0).values
-            y_test  = test[target_col].values
+            y_val = val[target_col].values if len(val) > 0 else None
+            y_test = test[target_col].values
 
             logger.info(f"Test year {yr_start.year}: "
                         f"train={len(train):,}  val={len(val):,}  test={len(test):,}")
@@ -510,13 +517,8 @@ class BacktestEngine:
             for name, model in models.items():
                 try:
                     if hasattr(model, "fit"):
-                        # Handle DataFrame-aware models (OLS-3, etc.)
-                        if name == "OLS-3":
-                            model.fit(train[feat_cols].fillna(0), y_train)
-                        else:
-                            model.fit(X_train, y_train, X_val, y_val)
-                    pred = model.predict(X_test if name != "OLS-3"
-                                        else test[feat_cols].fillna(0))
+                        model.fit(X_tr, y_train, X_v, y_val)
+                    pred = model.predict(X_te)
                     predictions[name].extend(pred.tolist())
                 except Exception as e:
                     logger.error(f"{name} failed at {yr_start.year}: {e}")

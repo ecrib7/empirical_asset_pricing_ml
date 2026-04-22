@@ -91,7 +91,15 @@ class OLS3Model:
         self.model = LinearRegression()
         self.cols_  = ["mvel1_const", "bm_const", "mom12m_const"]
 
-    def fit(self, X: pd.DataFrame, y: np.ndarray, **kwargs) -> "OLS3Model":
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        X_val: Optional[pd.DataFrame] = None,
+        y_val: Optional[np.ndarray] = None,
+        **kwargs,
+    ) -> "OLS3Model":
+        """OLS ignores ``X_val`` / ``y_val`` (no hyper-parameter search); signature matches other models."""
         primary = ["mvel1_const", "bm_const", "mom12m_const"]
         fallback = ["mvel1", "bm", "mom12m"]
         avail = [c for c in self.cols_ if c in X.columns]
