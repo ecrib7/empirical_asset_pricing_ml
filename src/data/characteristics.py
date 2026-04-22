@@ -20,8 +20,10 @@ Organisation
   CharacteristicsBuilder – orchestrates all of the above
 """
 
+from __future__ import annotations
+
 import warnings
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -29,6 +31,13 @@ from scipy import stats
 
 # Suppress benign pandas warnings
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+
+# Characteristics excluded from cross-sectional ranking in ``CharacteristicsBuilder``
+# (not implemented in this module / need data beyond monthly CRSP-Compustat merge).
+EXCLUDED_CHARS = [
+    "pricedelay",  # Hou–Moskowitz (2005): rolling 48m OLS on contemporaneous + lagged mkt returns
+    "maxret",      # GKX: max daily return in month — needs daily CRSP pre-aggregated to monthly max
+]
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -103,11 +112,11 @@ class MomentumBuilder:
     def maxret(daily_ret: Optional[pd.Series] = None) -> pd.Series:
         """
         Maximum daily return in the past month (GKX 2019).
-        Requires a daily return series aggregated to monthly frequency
-        by taking the max within each calendar month.
 
-        If only monthly data is available, set this to NaN and exclude
-        from the feature set — do NOT use monthly ret as a proxy.
+        Requires daily CRSP returns pre-aggregated to the monthly panel: for each
+        (permno, calendar month), pass the max of daily returns within that month.
+        ``CharacteristicsBuilder`` does not compute this from monthly ``ret``;
+        pass a pre-built column or leave excluded (see ``EXCLUDED_CHARS``).
         """
         if daily_ret is None:
             # ``daily_ret.index`` is undefined here; placeholder until daily CRSP is wired.
@@ -194,18 +203,13 @@ class LiquidityBuilder:
     @staticmethod
     def pricedelay(ret: pd.Series, mkt_ret: pd.Series) -> pd.Series:
         """
-        Hou & Moskowitz (2005) price delay.
-        Ratio of R² improvement when lagged market returns are added.
-        Approximated as 1 - R²(restricted) / R²(full) from rolling OLS.
-        Full implementation requires per-stock regression.
+        Hou & Moskowitz (2005) price delay (not implemented here).
+
+        Full specification uses rolling 48-month OLS of stock returns on
+        contemporaneous and lagged market returns. Excluded from the builder
+        feature set; see ``EXCLUDED_CHARS``.
         """
-        warnings.warn(
-            "LiquidityBuilder.pricedelay() is a placeholder. "
-            "Price delay requires per-stock rolling OLS regression on lagged "
-            "market returns and is not yet implemented. This column will be all NaN.",
-            stacklevel=2,
-        )
-        return pd.Series(np.nan, index=ret.index)
+        return pd.Series(np.nan, index=ret.index, dtype=float)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -503,14 +507,64 @@ class IndustryBuilder:
     def indmom_panel(panel: pd.DataFrame) -> pd.Series:
         """
         Industry momentum (Moskowitz & Grinblatt 1999):
-        equal-weighted average of stocks in the same 2-digit SIC industry,
-        using past 12-month cumulative returns, lagged 1 month.
+        equal-weighted average of firm-level 12-month momentum (months t−13 to t−2,
+        skipping t−1) among stocks in the same 2-digit SIC industry and month.
         """
-        panel = panel.copy()
-        panel["sic2"] = panel["siccd"].astype(str).str[:2]
-        panel["mom12m_indmom"] = panel.groupby(["date", "sic2"])["ret"] \
-                                      .transform(lambda x: x.shift(1).mean())
-        return panel["mom12m_indmom"]
+        p = panel.copy()
+        p["mom12m_stock"] = p.groupby("permno", sort=False)["ret"].transform(
+            lambda s: MomentumBuilder.mom12m(s)
+        )
+        p["sic2"] = p["siccd"].astype(str).str[:2]
+        indmom = p.groupby(["date", "sic2"])["mom12m_stock"].transform("mean")
+        return indmom
+
+
+def _build_accounting_features(df: pd.DataFrame) -> pd.DataFrame:
+    """One ``groupby("permno")`` pass for all Compustat-heavy characteristics."""
+
+    def _per_permno(g: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "agr": FundamentalsBuilder.agr(g),
+                "invest": FundamentalsBuilder.invest(g),
+                "lev": FundamentalsBuilder.lev(g),
+                "bm": FundamentalsBuilder.bm(g),
+                "ep": FundamentalsBuilder.ep(g),
+                "sp": FundamentalsBuilder.sp(g),
+                "cfp": FundamentalsBuilder.cfp(g),
+                "dy": FundamentalsBuilder.dy(g),
+                "operprof": FundamentalsBuilder.operprof(g),
+                "gma": FundamentalsBuilder.gma(g),
+                "acc": AccrualsBuilder.acc(g),
+                "pctacc": AccrualsBuilder.pctacc(g),
+                "absacc": AccrualsBuilder.absacc(g),
+                "chcsho": FundamentalsBuilder.chcsho(g),
+                "nincr": FundamentalsBuilder.nincr(g),
+                "rd_mve": FundamentalsBuilder.rd_mve(g),
+                "cashdebt": FundamentalsBuilder.cashdebt(g),
+                "chinv": FundamentalsBuilder.chinv(g),
+                "lgr": FundamentalsBuilder.lgr(g),
+                "egr": FundamentalsBuilder.egr(g),
+                "sgr": FundamentalsBuilder.sgr(g),
+                "depr": FundamentalsBuilder.depr(g),
+                "cashpr": FundamentalsBuilder.cashpr(g),
+                "convind": FundamentalsBuilder.convind(g),
+                "securedind": FundamentalsBuilder.securedind(g),
+                "roeq": FundamentalsBuilder.roeq(g),
+                "roaq": FundamentalsBuilder.roaq(g),
+                "orgcap": FundamentalsBuilder.orgcap(g),
+            },
+            index=g.index,
+        )
+
+    gb = df.groupby("permno", sort=False, group_keys=False)
+    try:
+        out = gb.apply(_per_permno, include_groups=False)
+    except TypeError:
+        out = gb.apply(_per_permno)
+    if isinstance(out.index, pd.MultiIndex):
+        out = out.reset_index(level=0, drop=True)
+    return out.reindex(df.index)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -522,6 +576,11 @@ class CharacteristicsBuilder:
     Orchestrates the construction of all GKX (2019) characteristics
     from the merged CRSP + Compustat panel.
 
+    The caller is responsible for ensuring Compustat data is lagged by at least
+    six months from ``datadate`` before merging into the panel (e.g. Fama–French
+    style: use accounting data only once it is public). This class does **not**
+    apply any additional lag to accounting variables.
+
     Parameters
     ----------
     panel : pd.DataFrame
@@ -532,8 +591,19 @@ class CharacteristicsBuilder:
     """
 
     def __init__(self, panel: pd.DataFrame, mkt_ret: pd.Series):
-        self.panel   = panel.copy().sort_values(["permno", "date"])
+        self.panel = panel.copy().sort_values(["permno", "date"])
         self.mkt_ret = mkt_ret
+        if "datadate" in self.panel.columns:
+            both = self.panel["date"].notna() & self.panel["datadate"].notna()
+            n_both = int(both.sum())
+            if n_both > 0:
+                dd_lag = self.panel.loc[both, "datadate"] + pd.DateOffset(months=6)
+                lag_ok = self.panel.loc[both, "date"] >= dd_lag
+                if float(lag_ok.mean()) < 0.95:
+                    raise ValueError(
+                        "Lookahead bias detected: Compustat data appears not to be lagged by 6 months. "
+                        "Apply lag before passing panel to CharacteristicsBuilder."
+                    )
 
     def build(self) -> pd.DataFrame:
         # Vectorised implementation — avoids explicit Python loop for performance on large panels
@@ -612,34 +682,9 @@ class CharacteristicsBuilder:
 
         # ─ Accounting (if Compustat data merged in) ─
         if "at" in df.columns:
-            df["agr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.agr(g))
-            df["invest"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.invest(g))
-            df["lev"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.lev(g))
-            df["bm"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.bm(g))
-            df["ep"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.ep(g))
-            df["sp"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.sp(g))
-            df["cfp"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.cfp(g))
-            df["dy"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.dy(g))
-            df["operprof"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.operprof(g))
-            df["gma"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.gma(g))
-            df["acc"] = _groupby_permno_apply(df, lambda g: AccrualsBuilder.acc(g))
-            df["pctacc"] = _groupby_permno_apply(df, lambda g: AccrualsBuilder.pctacc(g))
-            df["absacc"] = _groupby_permno_apply(df, lambda g: AccrualsBuilder.absacc(g))
-            df["chcsho"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.chcsho(g))
-            df["nincr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.nincr(g))
-            df["rd_mve"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.rd_mve(g))
-            df["cashdebt"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.cashdebt(g))
-            df["chinv"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.chinv(g))
-            df["lgr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.lgr(g))
-            df["egr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.egr(g))
-            df["sgr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.sgr(g))
-            df["depr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.depr(g))
-            df["cashpr"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.cashpr(g))
-            df["convind"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.convind(g))
-            df["securedind"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.securedind(g))
-            df["roeq"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.roeq(g))
-            df["roaq"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.roaq(g))
-            df["orgcap"] = _groupby_permno_apply(df, lambda g: FundamentalsBuilder.orgcap(g))
+            _acc = _build_accounting_features(df)
+            for _c in _acc.columns:
+                df[_c] = _acc[_c]
             df["rd_sale"] = (
                 df.get("xrd", pd.Series(0.0, index=df.index)).fillna(0)
                 / df.get("sale", pd.Series(np.nan, index=df.index)).replace(0, np.nan)
@@ -671,11 +716,11 @@ class CharacteristicsBuilder:
 
         return df
 
-    def _get_char_cols(self, df: pd.DataFrame):
+    def _get_char_cols(self, df: pd.DataFrame) -> list[str]:
         known_chars = [
-            "mom1m", "mom6m", "mom12m", "mom36m", "chmom", "indmom", "maxret",
+            "mom1m", "mom6m", "mom12m", "mom36m", "chmom", "indmom",
             "mvel1", "dolvol", "turn", "std_turn", "ill", "zerotrade", "baspread",
-            "std_dolvol", "pricedelay",
+            "std_dolvol",
             "beta", "betasq", "retvol", "idiovol",
             "agr", "invest", "lev", "bm", "ep", "sp", "cfp", "dy",
             "operprof", "gma", "acc", "pctacc", "absacc", "chcsho", "nincr",
@@ -683,7 +728,7 @@ class CharacteristicsBuilder:
             "cashpr", "convind", "securedind", "roeq", "roaq", "orgcap",
             "rd_sale", "age",
         ]
-        return [c for c in known_chars if c in df.columns]
+        return [c for c in known_chars if c in df.columns and c not in EXCLUDED_CHARS]
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -693,8 +738,8 @@ class CharacteristicsBuilder:
 def build_feature_matrix(
     panel: pd.DataFrame,
     macro: pd.DataFrame,
-    char_cols: list,
-    macro_cols: list = None,
+    char_cols: List[str],
+    macro_cols: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
     Constructs the GKX (2019) feature matrix z_{i,t} = x_t ⊗ c_{i,t}

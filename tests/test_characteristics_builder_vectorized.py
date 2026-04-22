@@ -169,7 +169,8 @@ def _make_panel(n_perm: int = 5, n_months: int = 60, seed: int = 42, with_bid_as
                 "pstk": 0.0,
                 "atq": at,
                 "csho": shr / 1e3,
-                "datadate": pd.Timestamp(t.year, 6, 15),
+                # At least 6 months after datadate (CharacteristicsBuilder.__init__ guard)
+                "datadate": t - pd.DateOffset(months=8),
                 "siccd": 100 * p + 10,
             }
             if with_bid_ask:

@@ -39,9 +39,9 @@ MACRO_VARS = ["dp", "ep", "bm", "ntis", "tbl", "tms", "dfy", "svar"]
 # ─────────────────────────────────────────
 #  Characteristic groups (Green et al. 2017)
 # ─────────────────────────────────────────
-MOMENTUM_CHARS   = ["mom1m", "mom6m", "mom12m", "mom36m", "chmom", "indmom", "maxret"]
+MOMENTUM_CHARS   = ["mom1m", "mom6m", "mom12m", "mom36m", "chmom", "indmom"]
 LIQUIDITY_CHARS  = ["mvel1", "dolvol", "turn", "std_turn", "ill", "zerotrade", "baspread",
-                    "std_dolvol", "pricedelay"]
+                    "std_dolvol"]
 RISK_CHARS       = ["beta", "betasq", "idiovol", "retvol"]
 VALUATION_CHARS  = ["bm", "ep", "sp", "cfp", "dy", "rd_mve", "cashpr"]
 QUALITY_CHARS    = ["agr", "invest", "chcsho", "nincr", "operprof", "gma",
