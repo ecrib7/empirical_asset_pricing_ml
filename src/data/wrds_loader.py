@@ -323,9 +323,25 @@ class WRDSLoader:
         else:
             raw = pd.read_csv(path)
         # Goyal's file uses 'yyyymm' format
-        date_col = [c for c in raw.columns if "date" in c.lower() or "yyyymm" in c.lower()][0]
-        raw = raw.rename(columns={date_col: "yyyymm"})
-        raw["date"] = pd.to_datetime(raw["yyyymm"].astype(str), format="%Y%m")
+        import logging as _logging
+        _logging.debug("Goyal CSV columns: %s", list(raw.columns))
+        _candidates = [c for c in raw.columns if any(
+            k in c.lower() for k in ("date","yyyymm","year","ym","yyyy","period","month"))]
+        if _candidates:
+            date_col = _candidates[0]
+        else:
+            date_col = raw.columns[0]
+            _logging.warning("No date column found; using first column: %s", date_col)
+        # Parse date robustly — Goyal file may have floats like 197001.0
+        _val_str = str(raw[date_col].iloc[0]).split(".")[0]
+        if len(_val_str) == 6:
+            raw["date"] = pd.to_datetime(
+                raw[date_col].astype(float).astype(int).astype(str), format="%Y%m")
+        elif len(_val_str) == 8:
+            raw["date"] = pd.to_datetime(
+                raw[date_col].astype(float).astype(int).astype(str), format="%Y%m%d")
+        else:
+            raw["date"] = pd.to_datetime(raw[date_col], format="mixed")
         raw["date"] = raw["date"] + pd.offsets.MonthEnd(0)
 
         # Standardise column names (Goyal uses exact names)
