@@ -12,7 +12,7 @@ Usage
     python main.py --mode full --wrds-username your_username
 
     # Stage 1: data only (build feature matrix, then stop)
-    python main.py --mode data-only --wrds-username brice77 --goyal-csv /content/PredictorData2023.xlsx
+    python main.py --mode data-only --wrds-username $WRDS_USERNAME --goyal-csv data/PredictorData.xlsx
 
     # Stage 2: train models incrementally (restart runtime between groups)
     python main.py --mode train --models OLS-3 ENet+H PCR PLS GLM+H
