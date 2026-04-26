@@ -4,7 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="006acfba-f7ab-4bbf-9c3c-d9c568c69953" name="Changes" comment="" />
+    <list default="true" id="006acfba-f7ab-4bbf-9c3c-d9c568c69953" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/data/Data2024.xlsx" beforeDir="false" afterPath="$PROJECT_DIR$/data/Data2024.xlsx" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -28,7 +31,7 @@
 }</component>
   <component name="GithubPullRequestsUISettings">{
   &quot;selectedUrlAndAccountId&quot;: {
-    &quot;url&quot;: &quot;https://github.com/ecrib7/empirical_asset_pricing_ml.git&quot;,
+    &quot;url&quot;: &quot;https://github.com/ecrib7/empirical_asset_pricing_ml/&quot;,
     &quot;accountId&quot;: &quot;6c727b87-5d3b-4f8d-991b-d69f9447022c&quot;
   }
 }</component>
@@ -47,6 +50,7 @@
   </component>
   <component name="PropertiesComponent">{
   &quot;keyToString&quot;: {
+    &quot;ASKED_MARK_IGNORED_FILES_AS_EXCLUDED&quot;: &quot;true&quot;,
     &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
     &quot;Python.dashboard.executor&quot;: &quot;Run&quot;,
     &quot;Python.full.executor&quot;: &quot;Run&quot;,
@@ -61,7 +65,7 @@
     &quot;com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1&quot;: &quot;true&quot;,
     &quot;git-widget-placeholder&quot;: &quot;main&quot;,
     &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;C:/Users/namyb/Documents/Columbia/Cours/Algo Trading/Project/empirical_asset_pricing_ml/outputs&quot;,
+    &quot;last_opened_file_path&quot;: &quot;C:/Users/namyb/Documents/Columbia/Cours/Algo Trading/Project/empirical_asset_pricing_ml&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
     &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
@@ -215,7 +219,10 @@
       <workItem from="1775588788564" duration="2017000" />
       <workItem from="1775599488114" duration="224000" />
       <workItem from="1775600150145" duration="3788000" />
-      <workItem from="1775689608047" duration="3333000" />
+      <workItem from="1775689608047" duration="4770000" />
+      <workItem from="1777079877049" duration="1277000" />
+      <workItem from="1777137358327" duration="2990000" />
+      <workItem from="1777162875373" duration="299000" />
     </task>
     <servers />
   </component>
