@@ -22,12 +22,16 @@ Organisation
 
 from __future__ import annotations
 
+import gc
+import logging
 import warnings
 from typing import List, Optional
 
 import numpy as np
 import pandas as pd
 from scipy import stats
+
+logger = logging.getLogger(__name__)
 
 # Suppress benign pandas warnings
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
@@ -732,7 +736,7 @@ class CharacteristicsBuilder:
 
 
 # ════════════════════════════════════════════════════════════════════
-#  Feature matrix builder
+#  Feature matrix builder — memory-efficient streaming version
 # ════════════════════════════════════════════════════════════════════
 
 def build_feature_matrix(
@@ -740,51 +744,100 @@ def build_feature_matrix(
     macro: pd.DataFrame,
     char_cols: List[str],
     macro_cols: Optional[List[str]] = None,
+    dtype: np.dtype = np.float32,
 ) -> pd.DataFrame:
     """
-    Constructs the GKX (2019) feature matrix z_{i,t} = x_t ⊗ c_{i,t}
-    where x_t = (1, macro_1, …, macro_8) and c_{i,t} = firm characteristics.
+    Construct GKX (2019) features z_{i,t} = x_t ⊗ c_{i,t} where
+    x_t = (1, macro_1, …, macro_8) and c_{i,t} = firm characteristics.
+    Adds 74 SIC2 industry dummies as additional features.
 
-    Adds 74 industry dummies as additional features.
+    Memory-efficient implementation:
+      * Allocates a single contiguous float32 array up front.
+      * Fills it column by column without building intermediate DataFrames.
+      * Only id columns (permno/date/ret/me) and SIC dummies are kept as object/float64;
+        everything else is float32.
 
-    Returns full feature matrix appended to panel (permno, date, ret + features).
+    For a 3.1M-row panel × 49 chars × 9 macro slots (1 const + 8) the resulting
+    array is ~3.1M × 441 × 4 bytes ≈ 5.5 GB — comfortably within 51 GB.
     """
     if macro_cols is None:
         macro_cols = ["dp", "ep", "bm", "ntis", "tbl", "tms", "dfy", "svar"]
 
-    # Merge macro
+    # Drop chars that aren't actually present in the panel
+    char_cols = [c for c in char_cols if c in panel.columns]
+
+    # ── Merge macro onto panel (left join on date) ────────────────────────
     macro_sub = macro[["date"] + macro_cols].copy()
-    macro_rename = {m: f"macro_{m}" for m in macro_cols}
-    macro_sub = macro_sub.rename(columns=macro_rename)
-    macro_prefixed = [f"macro_{m}" for m in macro_cols]
-    panel = panel.merge(macro_sub, on="date", how="left")
-    macro_filled = panel[macro_prefixed].fillna(0.0)
+    panel = panel.merge(
+        macro_sub.rename(columns={m: f"macro_{m}" for m in macro_cols}),
+        on="date",
+        how="left",
+    )
 
-    # Kronecker product: for each macro variable (+ constant), multiply all chars
-    feature_dfs = []
+    n_rows = len(panel)
+    n_chars = len(char_cols)
+    n_blocks = 1 + len(macro_cols)  # const + each macro
+    n_features = n_chars * n_blocks
 
-    # Constant × chars
-    for c in char_cols:
-        if c in panel.columns:
-            feature_dfs.append(panel[[c]].rename(columns={c: f"{c}_const"}))
+    logger.info(
+        f"build_feature_matrix: allocating {n_rows:,} × {n_features} "
+        f"({n_rows * n_features * np.dtype(dtype).itemsize / 1e9:.2f} GB, dtype={dtype})"
+    )
 
-    # Macro × chars
+    # ── Pre-extract char and macro columns as float32 numpy arrays ────────
+    chars_arr = np.empty((n_rows, n_chars), dtype=dtype)
+    for j, c in enumerate(char_cols):
+        chars_arr[:, j] = panel[c].to_numpy(dtype=dtype, copy=False, na_value=np.nan)
+
+    macros_arr = np.empty((n_rows, len(macro_cols)), dtype=dtype)
+    for j, m in enumerate(macro_cols):
+        col = panel[f"macro_{m}"].to_numpy(dtype=dtype, copy=False, na_value=np.nan)
+        # Fill missing macros with 0.0 (matches old behaviour)
+        np.nan_to_num(col, copy=False, nan=0.0)
+        macros_arr[:, j] = col
+
+    # Free panel macro columns we no longer need
+    panel = panel.drop(columns=[f"macro_{m}" for m in macro_cols])
+    gc.collect()
+
+    # ── Allocate destination block and fill ───────────────────────────────
+    feature_arr = np.empty((n_rows, n_features), dtype=dtype)
+
+    # Block 0: const × chars (just a copy)
+    feature_arr[:, :n_chars] = chars_arr
+
+    # Blocks 1..K: macro_k × chars (broadcast multiply, in-place into the slice)
+    for k in range(len(macro_cols)):
+        start = (k + 1) * n_chars
+        end   = start + n_chars
+        # macros_arr[:, k:k+1] broadcasts across chars; result written directly
+        np.multiply(chars_arr, macros_arr[:, k:k+1], out=feature_arr[:, start:end])
+
+    # Free char/macro arrays now that the product is materialized
+    del chars_arr, macros_arr
+    gc.collect()
+
+    # ── Build feature column names ────────────────────────────────────────
+    feature_names = [f"{c}_const" for c in char_cols]
     for m in macro_cols:
-        m_col = f"macro_{m}"
-        for c in char_cols:
-            if c in panel.columns:
-                feat_name = f"{c}_{m}"
-                feature_dfs.append(
-                    (panel[c] * macro_filled[m_col]).rename(feat_name).to_frame()
-                )
+        feature_names.extend(f"{c}_{m}" for c in char_cols)
 
-    features = pd.concat(feature_dfs, axis=1)
+    # ── Wrap as DataFrame without copying the underlying ndarray ──────────
+    features_df = pd.DataFrame(feature_arr, columns=feature_names, copy=False)
 
-    # Add SIC2 dummies
+    # ── Assemble final result: id cols + features + SIC dummies ───────────
+    id_cols = ["permno", "date", "ret", "me"]
+    id_df = panel[id_cols].reset_index(drop=True)
+
     sic_cols = [c for c in panel.columns if c.startswith("sic2_")]
     if sic_cols:
-        features = pd.concat([features, panel[sic_cols]], axis=1)
+        sic_df = panel[sic_cols].astype(dtype).reset_index(drop=True)
+        result = pd.concat([id_df, features_df, sic_df], axis=1, copy=False)
+    else:
+        result = pd.concat([id_df, features_df], axis=1, copy=False)
 
-    # Final feature matrix
-    result = pd.concat([panel[["permno", "date", "ret", "me"]], features], axis=1)
-    return result.reset_index(drop=True)
+    logger.info(
+        f"build_feature_matrix: done — shape={result.shape}, "
+        f"in-memory={result.memory_usage(deep=True).sum() / 1e9:.2f} GB"
+    )
+    return result

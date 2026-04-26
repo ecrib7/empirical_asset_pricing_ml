@@ -8,11 +8,11 @@ Usage
     # YAML experiment scaffold (no data pull; returns stub dict):
     python main.py --config configs/experiment.yaml
 
-    # Full pipeline (requires WRDS credentials):
+    # Full pipeline (requires WRDS credentials + data/gwz_data_csv_2024.zip):
     python main.py --mode full --wrds-username your_username
 
     # Stage 1: data only (build feature matrix, then stop)
-    python main.py --mode data-only --wrds-username $WRDS_USERNAME --goyal-csv data/PredictorData.xlsx
+    python main.py --mode data-only --wrds-username $WRDS_USERNAME
 
     # Stage 2: train models incrementally (restart runtime between groups)
     python main.py --mode train --models OLS-3 ENet+H PCR PLS GLM+H
@@ -105,6 +105,21 @@ def generate_synthetic_data(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Macro predictors — sourced from data/gwz_data_csv_2024.zip
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_macro(start: str, end: str) -> pd.DataFrame:
+    """Parse the GWZ csv zip into data/cache/macro.parquet and return the DataFrame."""
+    from src.data.gwz_macro import build_macro_parquet
+    return build_macro_parquet(
+        data_dir=Path("data"),
+        cache_path=Path("data/cache/macro.parquet"),
+        start_date=start,
+        end_date=end,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Data-only pipeline (Stage 1)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -126,7 +141,7 @@ def run_data_only(args) -> None:
 
 
 def _data_step_fetch(args) -> None:
-    """Step 1: Fetch raw tables from WRDS and cache as parquet."""
+    """Step 1: Fetch raw tables from WRDS and cache as parquet, plus build macro from GWZ zip."""
     from src.data.wrds_loader import WRDSLoader
 
     logger.info("=== Data Step 1/4: Fetching WRDS data ===")
@@ -138,15 +153,10 @@ def _data_step_fetch(args) -> None:
     loader.get_compustat_annual()
     loader.get_compustat_quarterly()
     loader.get_crsp_compustat_link()
-    allow_macro_stub = os.environ.get("GKX_ALLOW_MACRO_STUB", "").strip().lower() in (
-        "1", "true", "yes",
-    )
-    macro = loader.get_macro_predictors(
-        goyal_csv_path=args.goyal_csv if hasattr(args, "goyal_csv") else None,
-        allow_macro_stub=allow_macro_stub,
-    )
-    macro.to_parquet("data/cache/macro.parquet", index=False)
     loader.close()
+
+    # Macro predictors come from the GWZ csv zip in data/, not WRDS
+    _build_macro(start=loader.start_date, end=loader.end_date)
     logger.info("=== Step 1 complete. Cached: crsp, compustat, link, macro ===")
 
 
@@ -358,14 +368,10 @@ def run_full_pipeline(args) -> dict:
     comp_a = loader.get_compustat_annual()
     comp_q = loader.get_compustat_quarterly()
     link   = loader.get_crsp_compustat_link()
-    allow_macro_stub = os.environ.get("GKX_ALLOW_MACRO_STUB", "").strip().lower() in (
-        "1", "true", "yes",
-    )
-    macro = loader.get_macro_predictors(
-        goyal_csv_path=args.goyal_csv if hasattr(args, "goyal_csv") else None,
-        allow_macro_stub=allow_macro_stub,
-    )
     loader.close()
+
+    # Macro predictors come from the GWZ csv zip in data/, not WRDS
+    macro = _build_macro(start=loader.start_date, end=loader.end_date)
 
     # ── 2. Merge Compustat onto CRSP ────────────────────────────────────────
     logger.info("=== Step 2: Merging CRSP + Compustat ===")
@@ -564,8 +570,6 @@ def parse_args():
         ),
     )
     parser.add_argument("--wrds-username", default=os.environ.get("WRDS_USERNAME", ""))
-    parser.add_argument("--goyal-csv", default=None,
-                        help="Path to Welch & Goyal PredictorData CSV/XLSX")
     parser.add_argument("--train-start", default="1957-03-01")
     parser.add_argument("--val-start",   default="1975-01-01")
     parser.add_argument("--val-end",     default="1986-12-31")
