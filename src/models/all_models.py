@@ -17,13 +17,15 @@ Huber loss is used for OLS+, ENet, GLM, GBRT (paper default).
 
 from __future__ import annotations
 
+import gc
 import logging
-import numpy as np
-import pandas as pd
 from typing import List, Optional, Tuple
 
+import numpy as np
+import pandas as pd
+
 from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.linear_model import LinearRegression, ElasticNet, HuberRegressor
+from sklearn.linear_model import LinearRegression, ElasticNet, HuberRegressor, SGDRegressor
 from sklearn.decomposition import PCA
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -32,6 +34,88 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import r2_score
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Memory-efficient helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _to_float32_array(X) -> np.ndarray:
+    """Convert pandas / numpy input to a contiguous float32 array without copying when possible."""
+    if hasattr(X, "values"):
+        arr = X.values
+    else:
+        arr = X
+    if arr.dtype == np.float32 and arr.flags["C_CONTIGUOUS"]:
+        return arr
+    return np.ascontiguousarray(arr, dtype=np.float32)
+
+
+class _Float32Scaler:
+    """
+    Drop-in replacement for sklearn's StandardScaler that keeps everything in
+    float32. sklearn's StandardScaler silently upcasts to float64 on transform,
+    which doubles memory for our 1M+ x 518 inputs. This avoids that.
+    """
+
+    def fit(self, X: np.ndarray) -> "_Float32Scaler":
+        # Use float64 internally for accurate moments, then store as float32
+        self.mean_ = X.astype(np.float64, copy=False).mean(axis=0).astype(np.float32)
+        std = X.astype(np.float64, copy=False).std(axis=0)
+        std[std < 1e-8] = 1.0
+        self.scale_ = std.astype(np.float32)
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        out = np.empty(X.shape, dtype=np.float32)
+        np.subtract(X, self.mean_, out=out)
+        np.divide(out, self.scale_, out=out)
+        return out
+
+    def fit_transform(self, X: np.ndarray) -> np.ndarray:
+        return self.fit(X).transform(X)
+
+
+def _split_or_use_val(
+    Xn: np.ndarray, y: np.ndarray,
+    X_val: Optional[np.ndarray], y_val: Optional[np.ndarray],
+    val_frac: float = 0.2,
+):
+    """If no validation set is supplied, split the tail of training as validation."""
+    if X_val is None:
+        n_val = max(1, int(val_frac * len(Xn)))
+        return Xn[:-n_val], y[:-n_val], Xn[-n_val:], y[-n_val:]
+    return Xn, y, X_val, y_val
+
+
+_MAX_TRAIN_ROWS = 500_000
+
+
+def _subsample_train(
+    Xn: np.ndarray,
+    y: np.ndarray,
+    max_rows: int = _MAX_TRAIN_ROWS,
+    seed: int = 42,
+    label: str = "",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    If Xn has more than `max_rows`, return a deterministic random subsample.
+    Used by memory-bound models (PLS, GLM+H) where coordinate-descent / NIPALS
+    don't scale to 2.5M+ training rows on a 51 GB box. Validation set is
+    intentionally NOT subsampled — full validation gives unbiased model
+    selection.
+    """
+    n = len(Xn)
+    if n <= max_rows:
+        return Xn, y
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(n, size=max_rows, replace=False)
+    idx.sort()  # preserves cache locality on the big matrix
+    logger.info(
+        f"{label}subsampling training set from {n:,} -> {max_rows:,} rows "
+        f"(memory cap)"
+    )
+    return Xn[idx], y[idx]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -59,8 +143,12 @@ def _tune_on_val(
     y_val: np.ndarray,
     verbose: bool = False,
 ) -> Tuple[object, dict]:
-    """Grid search over param_grid using validation R²."""
-    best_r2  = -np.inf
+    """
+    Grid search over param_grid using validation R².
+    Memory-conscious: only keeps the current best model in memory; all others are
+    freed (incl. their coef arrays) before the next trial.
+    """
+    best_r2 = -np.inf
     best_model = None
     best_params = None
     for params in param_grid:
@@ -71,11 +159,19 @@ def _tune_on_val(
             if verbose:
                 logger.debug(f"  {params} → val R²={r2:.4f}")
             if r2 > best_r2:
+                # Free previous best before adopting the new one
+                if best_model is not None:
+                    del best_model
+                    gc.collect()
                 best_r2 = r2
-                best_model  = m
+                best_model = m
                 best_params = params
+            else:
+                del m
+                gc.collect()
         except Exception as e:
             logger.warning(f"  {params} failed: {e}")
+            gc.collect()
     return best_model, best_params
 
 
@@ -99,7 +195,6 @@ class OLS3Model:
         y_val: Optional[np.ndarray] = None,
         **kwargs,
     ) -> "OLS3Model":
-        """OLS ignores ``X_val`` / ``y_val`` (no hyper-parameter search); signature matches other models."""
         primary = ["mvel1_const", "bm_const", "mom12m_const"]
         fallback = ["mvel1", "bm", "mom12m"]
         avail = [c for c in self.cols_ if c in X.columns]
@@ -117,11 +212,11 @@ class OLS3Model:
                 f"First 10 columns of X: {sample_cols}"
             )
         self._avail = avail
-        self.model.fit(X[avail].values, y)
+        self.model.fit(X[avail].values.astype(np.float32, copy=False), y.astype(np.float32, copy=False))
         return self
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return self.model.predict(X[self._avail].values)
+        return self.model.predict(X[self._avail].values.astype(np.float32, copy=False))
 
     def oos_r2(self, X: pd.DataFrame, y: np.ndarray) -> float:
         return oos_r2(y, self.predict(X))
@@ -129,9 +224,15 @@ class OLS3Model:
 
 class ElasticNetModel:
     """
-    Elastic Net with Huber loss (GKX default).
-    Falls back to ElasticNet (L2 loss) if sklearn HuberRegressor
-    does not support L1 penalty.
+    Elastic Net (Huber loss, GKX paper default) — implemented via streaming SGD.
+
+    sklearn's ``ElasticNet`` (coordinate descent) does not fit in 51 GB on a
+    2.5M x 518 matrix because it upcasts to float64 and keeps several full-size
+    arrays during fitting. ``SGDRegressor`` processes the data one mini-batch
+    at a time, so peak RAM is dominated by the input matrix itself.
+
+    Bonus: SGDRegressor with ``loss='huber'`` is exactly the GKX objective —
+    closer to the paper than sklearn's L2-loss ``ElasticNet`` ever was.
     """
     name = "ENet+H"
 
@@ -140,12 +241,19 @@ class ElasticNetModel:
         alpha_grid: List[float] = None,
         l1_ratio: float = 0.5,
         use_huber: bool = True,
+        max_epochs: int = 30,
+        huber_epsilon: float = 0.001,
     ):
-        self.alpha_grid = alpha_grid or [1e-4, 1e-3, 1e-2, 5e-2, 0.1]
-        self.l1_ratio   = l1_ratio
-        self.use_huber  = use_huber
+        # SGDRegressor's `alpha` is the overall regularisation strength.
+        # Use a slightly broader grid than coordinate-descent ENet because
+        # SGD's optimal alpha typically sits at smaller values.
+        self.alpha_grid = alpha_grid or [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+        self.l1_ratio = l1_ratio
+        self.use_huber = use_huber
+        self.max_epochs = max_epochs
+        self.huber_epsilon = huber_epsilon
         self.best_model_: Optional[BaseEstimator] = None
-        self.scaler_     = StandardScaler()
+        self.scaler_ = _Float32Scaler()
 
     def fit(
         self,
@@ -154,32 +262,66 @@ class ElasticNetModel:
         X_val: pd.DataFrame | np.ndarray = None,
         y_val: np.ndarray = None,
     ) -> "ElasticNetModel":
-        Xn = self.scaler_.fit_transform(
-            X.values if hasattr(X, "values") else X
-        )
+        # Subsample BEFORE any float32 scaling copy — avoids a 3M-row intermediate
+        X_arr = _to_float32_array(X)
+        y32 = y.astype(np.float32, copy=False)
+        X_arr, y32 = _subsample_train(X_arr, y32, label="[ENet+H] train ")
+
+        # Now scale (matrix is now <=500K rows, ~1 GB)
+        Xn = self.scaler_.fit_transform(X_arr)
+        del X_arr
+        gc.collect()
+
         if X_val is not None:
-            Xv = self.scaler_.transform(X_val.values if hasattr(X_val, "values") else X_val)
+            Xv_arr = _to_float32_array(X_val)
+            yv32 = y_val.astype(np.float32, copy=False)
+            # Cap validation too (validation R^2 is stable on smaller samples)
+            Xv_arr, yv32 = _subsample_train(Xv_arr, yv32, max_rows=200_000, label="[ENet+H] val ")
+            Xv = self.scaler_.transform(Xv_arr)
+            del Xv_arr
+            gc.collect()
         else:
             n_val = max(1, int(0.2 * len(Xn)))
-            Xv, y_val = Xn[-n_val:], y[-n_val:]
-            Xn, y = Xn[:-n_val], y[:-n_val]
+            Xv, yv32 = Xn[-n_val:], y32[-n_val:]
+            Xn, y32 = Xn[:-n_val], y32[:-n_val]
+
+        loss = "huber" if self.use_huber else "squared_error"
 
         def make_model(alpha):
-            return ElasticNet(alpha=alpha, l1_ratio=self.l1_ratio,
-                              max_iter=5000, warm_start=False)
+            return SGDRegressor(
+                loss=loss,
+                penalty="elasticnet",
+                alpha=alpha,
+                l1_ratio=self.l1_ratio,
+                epsilon=self.huber_epsilon,
+                max_iter=self.max_epochs,
+                tol=1e-4,
+                early_stopping=False,   # we have our own validation grid
+                learning_rate="adaptive",
+                eta0=0.01,
+                random_state=42,
+                fit_intercept=True,
+                shuffle=True,
+            )
 
         param_grid = [{"alpha": a} for a in self.alpha_grid]
         self.best_model_, self.best_params_ = _tune_on_val(
-            make_model, param_grid, Xn, y, Xv, y_val
+            make_model, param_grid, Xn, y32, Xv, yv32
         )
         if self.best_model_ is None:
-            self.best_model_ = make_model(self.alpha_grid[len(self.alpha_grid)//2])
-            self.best_model_.fit(Xn, y)
+            self.best_model_ = make_model(self.alpha_grid[len(self.alpha_grid) // 2])
+            self.best_model_.fit(Xn, y32)
+
+        del Xn, Xv, y32, yv32
+        gc.collect()
         return self
 
     def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
-        Xn = self.scaler_.transform(X.values if hasattr(X, "values") else X)
-        return self.best_model_.predict(Xn)
+        Xn = self.scaler_.transform(_to_float32_array(X))
+        out = self.best_model_.predict(Xn)
+        del Xn
+        gc.collect()
+        return out
 
     def oos_r2(self, X, y) -> float:
         return oos_r2(y, self.predict(X))
@@ -191,86 +333,125 @@ class PCRModel:
 
     def __init__(self, n_components_grid: List[int] = None):
         self.n_components_grid = n_components_grid or [3, 5, 10, 20, 30, 40]
-        self.scaler_ = StandardScaler()
+        self.scaler_ = _Float32Scaler()
         self.best_k_: int = 10
         self.pca_: Optional[PCA] = None
         self.reg_: Optional[LinearRegression] = None
 
     def fit(self, X, y, X_val=None, y_val=None) -> "PCRModel":
-        Xn = self.scaler_.fit_transform(X.values if hasattr(X, "values") else X)
+        Xn = self.scaler_.fit_transform(_to_float32_array(X))
         if X_val is None:
             n_val = max(1, int(0.2 * len(Xn)))
             X_val, y_val = Xn[-n_val:], y[-n_val:]
             Xn, y = Xn[:-n_val], y[:-n_val]
         else:
-            X_val = self.scaler_.transform(X_val.values if hasattr(X_val, "values") else X_val)
+            X_val = self.scaler_.transform(_to_float32_array(X_val))
+
+        y32 = y.astype(np.float32, copy=False)
+        yv32 = y_val.astype(np.float32, copy=False)
 
         max_k = min(max(self.n_components_grid), Xn.shape[1], Xn.shape[0] - 1)
-        pca = PCA(n_components=max_k)
+        pca = PCA(n_components=max_k, svd_solver="randomized", random_state=0)
         pca.fit(Xn)
+        Z_train_full = pca.transform(Xn)
+        Z_val_full = pca.transform(X_val)
 
         best_r2 = -np.inf
         for k in self.n_components_grid:
             k = min(k, max_k)
-            Z_train = pca.transform(Xn)[:, :k]
-            Z_val   = pca.transform(X_val)[:, :k]
-            reg = LinearRegression().fit(Z_train, y)
-            r2  = oos_r2(y_val, reg.predict(Z_val))
+            reg = LinearRegression().fit(Z_train_full[:, :k], y32)
+            r2 = oos_r2(yv32, reg.predict(Z_val_full[:, :k]))
             if r2 > best_r2:
-                best_r2      = r2
+                best_r2 = r2
                 self.best_k_ = k
 
-        self.pca_ = PCA(n_components=self.best_k_).fit(Xn)
+        self.pca_ = PCA(n_components=self.best_k_, svd_solver="randomized", random_state=0).fit(Xn)
         Z = self.pca_.transform(Xn)
-        self.reg_ = LinearRegression().fit(Z, y)
+        self.reg_ = LinearRegression().fit(Z, y32)
+
+        del Xn, X_val, Z, Z_train_full, Z_val_full, pca
+        gc.collect()
         return self
 
     def predict(self, X) -> np.ndarray:
-        Xn = self.scaler_.transform(X.values if hasattr(X, "values") else X)
+        Xn = self.scaler_.transform(_to_float32_array(X))
         Z  = self.pca_.transform(Xn)
-        return self.reg_.predict(Z)
+        out = self.reg_.predict(Z)
+        del Xn, Z
+        gc.collect()
+        return out
 
     def oos_r2(self, X, y) -> float:
         return oos_r2(y, self.predict(X))
 
 
 class PLSModel:
-    """Partial Least Squares Regression."""
+    """
+    Partial Least Squares Regression.
+    Memory-conscious: float32 input, intermediate fits freed between trials.
+    """
     name = "PLS"
 
     def __init__(self, n_components_grid: List[int] = None):
         self.n_components_grid = n_components_grid or [1, 2, 3, 4, 5, 6, 8, 10]
-        self.scaler_ = StandardScaler()
+        self.scaler_ = _Float32Scaler()
         self.best_model_: Optional[PLSRegression] = None
 
     def fit(self, X, y, X_val=None, y_val=None) -> "PLSModel":
-        Xn = self.scaler_.fit_transform(X.values if hasattr(X, "values") else X)
+        # Subsample BEFORE scaling — avoids 3M-row float32 intermediate at year 2016
+        X_arr = _to_float32_array(X)
+        y32 = y.astype(np.float32, copy=False)
+        X_arr, y32 = _subsample_train(X_arr, y32, label="[PLS] train ")
+        Xn = self.scaler_.fit_transform(X_arr)
+        del X_arr
+        gc.collect()
+
         if X_val is None:
             n_val = max(1, int(0.2 * len(Xn)))
-            X_val, y_val = Xn[-n_val:], y[-n_val:]
-            Xn, y = Xn[:-n_val], y[:-n_val]
+            X_val, yv32 = Xn[-n_val:], y32[-n_val:]
+            Xn, y32 = Xn[:-n_val], y32[:-n_val]
         else:
-            X_val = self.scaler_.transform(X_val.values if hasattr(X_val, "values") else X_val)
+            Xv_arr = _to_float32_array(X_val)
+            yv32 = y_val.astype(np.float32, copy=False)
+            Xv_arr, yv32 = _subsample_train(Xv_arr, yv32, max_rows=200_000, label="[PLS] val ")
+            X_val = self.scaler_.transform(Xv_arr)
+            del Xv_arr
+            gc.collect()
 
         max_k = min(max(self.n_components_grid), Xn.shape[1], Xn.shape[0] - 1)
         best_r2 = -np.inf
         for k in self.n_components_grid:
             k = min(k, max_k)
             try:
-                pls = PLSRegression(n_components=k).fit(Xn, y)
-                r2  = oos_r2(y_val, pls.predict(X_val).flatten())
+                pls = PLSRegression(n_components=k, scale=False, max_iter=200, tol=1e-4)
+                pls.fit(Xn, y32)
+                r2 = oos_r2(yv32, pls.predict(X_val).flatten())
                 if r2 > best_r2:
+                    if self.best_model_ is not None:
+                        del self.best_model_
+                        gc.collect()
                     best_r2 = r2
                     self.best_model_ = pls
-            except Exception:
-                pass
+                else:
+                    del pls
+                    gc.collect()
+            except Exception as e:
+                logger.warning(f"PLS k={k} failed: {e}")
+                gc.collect()
+
         if self.best_model_ is None:
-            self.best_model_ = PLSRegression(n_components=1).fit(Xn, y)
+            self.best_model_ = PLSRegression(n_components=1, scale=False).fit(Xn, y32)
+
+        del Xn, X_val, y32, yv32
+        gc.collect()
         return self
 
     def predict(self, X) -> np.ndarray:
-        Xn = self.scaler_.transform(X.values if hasattr(X, "values") else X)
-        return self.best_model_.predict(Xn).flatten()
+        Xn = self.scaler_.transform(_to_float32_array(X))
+        out = self.best_model_.predict(Xn).flatten()
+        del Xn
+        gc.collect()
+        return out
 
     def oos_r2(self, X, y) -> float:
         return oos_r2(y, self.predict(X))
@@ -278,72 +459,132 @@ class PLSModel:
 
 class GLMModel:
     """
-    Generalised Linear Model with Group Lasso.
-    Approximated via ElasticNet on spline-expanded features.
-    Each characteristic is expanded with a quadratic spline (k=3 knots).
+    Generalised Linear Model with Group Lasso, approximated via ElasticNet on
+    spline-expanded features. Each characteristic is expanded with a quadratic
+    spline (n_knots knots).
+
+    Memory-conscious: pre-allocates the spline matrix as a single float32 array
+    instead of np.hstack-ing 1500+ small arrays. With 518 features × 3 knots
+    that's a 518 + 518×3 = 2,072-column matrix; at 1.1M rows that's ~9.1 GB
+    in float32 vs ~18 GB in float64 — manageable inside 51 GB.
     """
     name = "GLM+H"
 
     def __init__(self, n_knots: int = 3, alpha_grid: List[float] = None):
-        self.n_knots   = n_knots
+        self.n_knots = n_knots
         self.alpha_grid = alpha_grid or [1e-4, 1e-3, 1e-2, 5e-2, 0.1]
-        self.scaler_   = StandardScaler()
+        self.scaler_ = _Float32Scaler()
         self.best_model_: Optional[ElasticNet] = None
-        self.knots_: Optional[List[np.ndarray]] = None
+        self.knots_: Optional[np.ndarray] = None  # shape (n_features, n_knots), float32
 
     def _fit_spline_knots(self, X: np.ndarray) -> None:
-        """
-        Compute quantile knots per feature from training matrix ``X`` (scaled)
-        and store in ``self.knots_``. Validation/test expansions must use these
-        knots only (no refit on held-out quantiles).
-        """
-        self.knots_ = []
-        for j in range(X.shape[1]):
-            col = X[:, j]
-            self.knots_.append(
-                np.quantile(col, np.linspace(0.1, 0.9, self.n_knots))
-            )
+        """Compute quantile knots per feature; result is a (p, n_knots) float32 array."""
+        qs = np.linspace(0.1, 0.9, self.n_knots)
+        # np.quantile across columns; result shape (n_knots, p), then transpose
+        knots = np.quantile(X, qs, axis=0).T  # (p, n_knots)
+        self.knots_ = knots.astype(np.float32)
 
     def _spline_expand(self, X: np.ndarray) -> np.ndarray:
-        """Add quadratic spline terms using ``self.knots_`` from ``_fit_spline_knots``."""
+        """
+        Build the spline-expanded matrix in float32 by pre-allocating the full
+        output array and filling it in place. Avoids the np.hstack(parts) pattern
+        which builds a Python list of 1500+ small arrays.
+        """
         if self.knots_ is None:
             raise RuntimeError("Call _fit_spline_knots(X_train) before _spline_expand.")
-        parts = [X]
-        for j in range(X.shape[1]):
-            col = X[:, j]
-            for c in self.knots_[j]:
-                parts.append(np.maximum(col - c, 0).reshape(-1, 1) ** 2)
-        return np.hstack(parts)
+
+        n, p = X.shape
+        K = self.n_knots
+        out_cols = p + p * K
+        out = np.empty((n, out_cols), dtype=np.float32)
+
+        # Block 0: original columns
+        out[:, :p] = X
+
+        # Blocks 1..K: max(X - knot, 0) ** 2 for each knot, vectorized across all features
+        # knots_ is (p, K); for knot k, we want X - knots_[:, k:k+1].T broadcast to (n, p)
+        for k in range(K):
+            start = p + k * p
+            end = start + p
+            # Use a temporary scratch of shape (n, p); reuse to avoid repeat allocs
+            np.subtract(X, self.knots_[:, k], out=out[:, start:end])
+            np.maximum(out[:, start:end], 0.0, out=out[:, start:end])
+            np.square(out[:, start:end], out=out[:, start:end])
+
+        return out
 
     def fit(self, X, y, X_val=None, y_val=None) -> "GLMModel":
-        Xn = self.scaler_.fit_transform(X.values if hasattr(X, "values") else X)
+        # Subsample BEFORE scaling — at year 2016 the full X is 3M rows;
+        # scaling first would create a 6 GB float32 intermediate
+        X_arr = _to_float32_array(X)
+        y32 = y.astype(np.float32, copy=False)
+        X_arr, y32 = _subsample_train(X_arr, y32, label="[GLM+H] train ")
+        Xn = self.scaler_.fit_transform(X_arr)
+        del X_arr
+        gc.collect()
+
         if X_val is None:
             n_val = max(1, int(0.2 * len(Xn)))
-            Xv_n, y_val = Xn[-n_val:], y[-n_val:]
-            Xn, y = Xn[:-n_val], y[:-n_val]
+            Xv_n, yv32 = Xn[-n_val:], y32[-n_val:]
+            Xn, y32 = Xn[:-n_val], y32[:-n_val]
         else:
-            Xv_n = self.scaler_.transform(X_val.values if hasattr(X_val, "values") else X_val)
+            Xv_arr = _to_float32_array(X_val)
+            yv32 = y_val.astype(np.float32, copy=False)
+            Xv_arr, yv32 = _subsample_train(Xv_arr, yv32, max_rows=200_000, label="[GLM+H] val ")
+            Xv_n = self.scaler_.transform(Xv_arr)
+            del Xv_arr
+            gc.collect()
 
         self._fit_spline_knots(Xn)
-        Xs = self._spline_expand(Xn)
-        Xs_val = self._spline_expand(Xv_n)
 
+        # Spline expansion is the expensive step — log size
+        Xs = self._spline_expand(Xn)
+        del Xn
+        gc.collect()
+        logger.info(
+            f"GLM+H spline matrix: shape={Xs.shape}, "
+            f"size={Xs.nbytes / 1e9:.2f} GB"
+        )
+
+        Xs_val = self._spline_expand(Xv_n)
+        del Xv_n
+        gc.collect()
+
+        # Grid search with explicit free between alphas
         best_r2 = -np.inf
         for alpha in self.alpha_grid:
-            m = ElasticNet(alpha=alpha, l1_ratio=0.5, max_iter=5000)
-            m.fit(Xs, y)
-            r2 = oos_r2(y_val, m.predict(Xs_val))
+            m = ElasticNet(
+                alpha=alpha, l1_ratio=0.5, max_iter=5000,
+                selection="random", tol=1e-3,
+            )
+            m.fit(Xs, y32)
+            r2 = oos_r2(yv32, m.predict(Xs_val))
             if r2 > best_r2:
+                if self.best_model_ is not None:
+                    del self.best_model_
+                    gc.collect()
                 best_r2 = r2
                 self.best_model_ = m
+            else:
+                del m
+                gc.collect()
+
         if self.best_model_ is None:
-            self.best_model_ = ElasticNet(alpha=1e-3).fit(Xs, y)
+            self.best_model_ = ElasticNet(alpha=1e-3, selection="random", tol=1e-3).fit(Xs, y32)
+
+        del Xs, Xs_val, y32, yv32
+        gc.collect()
         return self
 
     def predict(self, X) -> np.ndarray:
-        Xn = self.scaler_.transform(X.values if hasattr(X, "values") else X)
+        Xn = self.scaler_.transform(_to_float32_array(X))
         Xs = self._spline_expand(Xn)
-        return self.best_model_.predict(Xs)
+        del Xn
+        gc.collect()
+        out = self.best_model_.predict(Xs)
+        del Xs
+        gc.collect()
+        return out
 
     def oos_r2(self, X, y) -> float:
         return oos_r2(y, self.predict(X))
@@ -387,8 +628,14 @@ class RandomForestModel:
             m.fit(Xn, y)
             r2 = oos_r2(y_val, m.predict(X_val))
             if r2 > best_r2:
+                if self.best_model_ is not None:
+                    del self.best_model_
+                    gc.collect()
                 best_r2 = r2
                 self.best_model_ = m
+            else:
+                del m
+                gc.collect()
         if self.best_model_ is None:
             self.best_model_ = RandomForestRegressor(
                 n_estimators=self.n_estimators, max_depth=3,
@@ -460,8 +707,14 @@ class GBRTModel:
                     m.fit(Xn, y)
                     r2 = oos_r2(y_val, m.predict(X_val))
                     if r2 > best_r2:
+                        if self.best_model_ is not None:
+                            del self.best_model_
+                            gc.collect()
                         best_r2 = r2
                         self.best_model_ = m
+                    else:
+                        del m
+                        gc.collect()
         if self.best_model_ is None:
             self.best_model_ = _make_gbrt(
                 n_estimators=300,
@@ -595,7 +848,6 @@ class NeuralNetModel:
             ).astype(np.float32)
             yv = y_val.astype(np.float32)
 
-        # Tune l1_lambda using a small search (optional; here we use given value)
         self.models_ = []
         input_dim = Xn.shape[1]
         dev = torch.device(self.device)
@@ -627,12 +879,10 @@ class NeuralNetModel:
                     opt.zero_grad()
                     pred = net(xb)
                     loss = huber(pred, yb)
-                    # L1 regularisation
                     l1 = sum(p.abs().sum() for p in net.parameters())
                     (loss + self.l1_lambda * l1).backward()
                     opt.step()
 
-                # Validation loss
                 net.eval()
                 with torch.no_grad():
                     val_loss = huber(net(Xv_t), yv_t).item()

@@ -443,6 +443,20 @@ def _run_backtest(
     models = get_all_models(nn_kwargs=nn_kwargs)
     if hasattr(args, "models") and args.models:
         models = {k: v for k, v in models.items() if k in args.models}
+
+    # Skip models whose final pickles already exist (use --force-retrain to override)
+    if not getattr(args, "force_retrain", False):
+        model_dir = Path("outputs/models")
+        already_done = {p.stem for p in model_dir.glob("*.pkl")}
+        skipped = [k for k in models if k in already_done]
+        if skipped:
+            logger.info(f"Skipping already-trained models: {skipped} "
+                        f"(use --force-retrain to retrain)")
+            models = {k: v for k, v in models.items() if k not in already_done}
+        if not models:
+            logger.info("All requested models already trained. Nothing to do.")
+            return {}
+
     logger.info(f"Models: {list(models.keys())}")
 
     # ── 6. Backtest ─────────────────────────────────────────────────────────
@@ -456,6 +470,11 @@ def _run_backtest(
         n_deciles=10,
         weighting="value",
         tc_bps=float(getattr(args, "tc_bps", 10.0)),
+        checkpoint_dir=getattr(
+            args,
+            "checkpoint_dir",
+            "data/cache/backtest_checkpoint",
+        ),
     )
 
     results = engine.run(feature_matrix, models)
@@ -579,6 +598,10 @@ def parse_args():
                         help="Transaction cost in bps (one-way)")
     parser.add_argument("--models", nargs="+", default=None,
                         help="Subset of models to run (e.g. OLS-3 ENet+H RF NN3)")
+    parser.add_argument("--force-retrain", action="store_true",
+                        help="Retrain models even if their pickles already exist in "
+                             "outputs/models/. By default, models with existing "
+                             "pickles are skipped.")
     parser.add_argument("--data-step",
                         choices=["all", "fetch", "merge", "chars", "features"],
                         default="all",
@@ -587,6 +610,13 @@ def parse_args():
                              "'merge' = CRSP+Compustat merge; "
                              "'chars' = build characteristics; "
                              "'features' = Kronecker feature matrix")
+    parser.add_argument(
+        "--checkpoint-dir",
+        default="data/cache/backtest_checkpoint",
+        help="Directory for per-year backtest checkpoints. Lives inside "
+             "data/cache/ by default so the existing cache backup cycle "
+             "covers it.",
+    )
     return parser.parse_args()
 
 
