@@ -13,17 +13,20 @@ Following GKX (2019) Section 3.4 exactly.
 
 Per-year checkpointing
 ----------------------
-``BacktestEngine.run`` writes a checkpoint to
-``data/cache/backtest_checkpoint/<model_set_hash>.pkl`` after each test year
-completes. If a run is interrupted, calling ``run`` again with the same
-``models`` dict resumes from the next un-finished year. To force a clean run
-delete the checkpoint file.
+``BacktestEngine.run`` writes a checkpoint after each test year completes.
+On Google Colab with Drive mounted the default directory is
+``/content/drive/MyDrive/Algo Trading Project/backtest_checkpoint``;
+otherwise it falls back to ``data/cache/backtest_checkpoint``.
+If a run is interrupted, calling ``run`` again with the same ``models``
+dict resumes from the next un-finished year. To force a clean run delete
+the checkpoint file.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import pickle
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -34,6 +37,15 @@ import pandas as pd
 from src.config import FREQ_MONTH_END, FREQ_YEAR_START
 
 logger = logging.getLogger(__name__)
+
+_DRIVE_CKPT = Path("/content/drive/MyDrive/Algo Trading Project/backtest_checkpoint")
+
+
+def _default_checkpoint_dir() -> str:
+    """On Colab with Drive mounted, default to Drive; otherwise local."""
+    if _DRIVE_CKPT.parent.exists():
+        return str(_DRIVE_CKPT)
+    return "data/cache/backtest_checkpoint"
 
 
 def add_forward_return_target(
@@ -328,7 +340,7 @@ class BacktestEngine:
         n_deciles:   int = 10,
         weighting:   str = "value",
         tc_bps:      float = 10.0,
-        checkpoint_dir: str = "data/cache/backtest_checkpoint",
+        checkpoint_dir: str | None = None,
     ):
         self.train_start = pd.Timestamp(train_start)
         self.val_start   = pd.Timestamp(val_start)
@@ -339,7 +351,7 @@ class BacktestEngine:
         self.weighting   = weighting
         self._tc_bps     = float(tc_bps)
         self.tc_model    = TransactionCostModel(tc_bps)
-        self.checkpoint_dir = Path(checkpoint_dir)
+        self.checkpoint_dir = Path(checkpoint_dir or _default_checkpoint_dir())
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     def _checkpoint_path(self, models: dict) -> Path:
@@ -368,9 +380,14 @@ class BacktestEngine:
         try:
             with open(tmp, "wb") as f:
                 pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+                f.flush()
+                os.fsync(f.fileno())
             tmp.replace(path)
+            logger.info(f"[checkpoint] written to {path}")
         except Exception as e:
             logger.warning(f"[checkpoint] save failed for {path}: {e}")
+            if tmp.exists():
+                tmp.unlink()
 
     def run(
         self,
