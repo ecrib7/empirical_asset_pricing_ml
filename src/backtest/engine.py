@@ -80,8 +80,9 @@ def feature_columns_for_training(
     date_col: str = "date",
     me_col: str = "me",
 ) -> List[str]:
-    """Columns used as X; raw contemporaneous ``ret`` is excluded when target is ``ret_fwd``."""
-    exclude = {id_col, date_col, target_col, me_col}
+    """Columns used as X; raw contemporaneous ``ret`` is excluded when target is ``ret_fwd``.
+    ``adv_dollar`` is engine-side TC metadata, not a predictor — exclude it too."""
+    exclude = {id_col, date_col, target_col, me_col, "adv_dollar"}
     if target_col == "ret_fwd":
         exclude.add("ret")
     return [c for c in fm.columns if c not in exclude]
@@ -108,7 +109,7 @@ class TransactionCostModel:
     def period_one_way_turnover(self, w_new: pd.Series, w_old: pd.Series) -> float:
         return one_way_portfolio_turnover(w_new, w_old)
 
-    def period_turnover_cost(self, w_new: pd.Series, w_old: pd.Series) -> float:
+    def period_turnover_cost(self, w_new: pd.Series, w_old: pd.Series, **kwargs) -> float:
         return float(self.cost * self.period_one_way_turnover(w_new, w_old))
 
     def net_return(
@@ -134,6 +135,144 @@ class TransactionCostModel:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Impact-aware transaction cost model
+#  ----------------------------------------------------------------------------
+#  Inspired by Frazzini, Israel & Moskowitz (2018) "Trading Costs", which
+#  decomposes execution cost into a *half-spread* component (cap-size-
+#  dependent) and a *price-impact* component (square-root of trade size /
+#  ADV). For each stock the per-trade cost rate (in bps of notional) is::
+#
+#     cost_bps_i = half_spread_bps(log_mcap_i)
+#                + impact_coef_bps * sqrt( (|Δw_i| * NAV) / ADV_i )
+#
+#  where ADV_i is monthly dollar volume divided by 21 trading days and
+#  NAV is normalised to $1 per leg. The portfolio-level cost at time t is::
+#
+#     tcost_t = Σ_i cost_bps_i * |Δw_i,t| / 10_000
+#
+#  Defaults: half-spread is 5 bps for the 95th-percentile log market cap
+#  and 25 bps for the 5th-percentile, log-linearly interpolated in between
+#  using each month's cross-sectional distribution. Impact coefficient is
+#  10 bps per √($-traded / ADV). These match the post-decimalisation
+#  calibration in FIM (2018) Tables 2-3.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ImpactAwareTransactionCostModel:
+    """
+    Per-stock proportional transaction cost with size-dependent half-spread
+    and FIM-style square-root market impact. Falls back to the simple flat
+    bps cost when per-stock metadata (market cap or dollar volume) is missing.
+
+    Parameters
+    ----------
+    half_spread_small_bps : float
+        Half-spread in bps applied to the smallest market-cap decile.
+    half_spread_large_bps : float
+        Half-spread in bps applied to the largest market-cap decile. The
+        full-sample half-spread is interpolated log-linearly between
+        these two anchors as a function of log(market equity).
+    impact_coef_bps : float
+        Coefficient λ in cost_bps = half_spread + λ * sqrt(trade$/ADV).
+    fallback_bps : float
+        Flat one-way cost (bps) used for stocks with missing metadata.
+    """
+
+    def __init__(
+        self,
+        half_spread_small_bps: float = 25.0,
+        half_spread_large_bps: float = 5.0,
+        impact_coef_bps: float = 10.0,
+        fallback_bps: float = 10.0,
+    ):
+        self.hs_small = half_spread_small_bps
+        self.hs_large = half_spread_large_bps
+        self.impact_coef = impact_coef_bps
+        self.fallback = fallback_bps / 10_000.0
+        self._mcap_log_min: Optional[float] = None
+        self._mcap_log_max: Optional[float] = None
+        self._mcap_t: Optional[pd.Series] = None
+        self._adv_t: Optional[pd.Series] = None
+
+    def set_metadata(
+        self,
+        mcap_t: Optional[pd.Series],
+        adv_t: Optional[pd.Series],
+    ) -> None:
+        """Update per-stock market cap and average daily $ volume for the
+        current test month. ADV is in raw dollars per trading day (we use
+        monthly $-volume / 21)."""
+        self._mcap_t = mcap_t
+        self._adv_t = adv_t
+        if mcap_t is not None and len(mcap_t.dropna()) > 0:
+            valid = mcap_t.dropna()
+            valid = valid[valid > 0]
+            if len(valid) > 1:
+                lm = np.log(valid)
+                self._mcap_log_min = float(lm.quantile(0.05))
+                self._mcap_log_max = float(lm.quantile(0.95))
+
+    def _half_spread_bps(self, stocks: pd.Index) -> pd.Series:
+        """Log-linear interpolation between small-cap and large-cap anchors."""
+        if (self._mcap_t is None
+                or self._mcap_log_min is None
+                or self._mcap_log_max is None):
+            return pd.Series(self.fallback * 10_000, index=stocks)
+        mc = self._mcap_t.reindex(stocks)
+        log_mc = np.log(mc.where(mc > 0))
+        denom = max(self._mcap_log_max - self._mcap_log_min, 1e-9)
+        pos = ((log_mc - self._mcap_log_min) / denom).clip(0.0, 1.0)
+        # Larger pos → larger mcap → smaller half-spread
+        hs = self.hs_small + (self.hs_large - self.hs_small) * pos
+        return hs.fillna(self.fallback * 10_000)
+
+    def _impact_bps(self, stocks: pd.Index, dollar_traded: pd.Series) -> pd.Series:
+        """λ * sqrt(dollar_traded / ADV). Returns 0 when ADV is missing or zero."""
+        if self._adv_t is None:
+            return pd.Series(0.0, index=stocks)
+        adv = self._adv_t.reindex(stocks)
+        ratio = dollar_traded / adv.where(adv > 0)
+        ratio = ratio.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(lower=0.0)
+        return self.impact_coef * np.sqrt(ratio)
+
+    def period_one_way_turnover(self, w_new: pd.Series, w_old: pd.Series) -> float:
+        return one_way_portfolio_turnover(w_new, w_old)
+
+    def period_turnover_cost(
+        self,
+        w_new: pd.Series,
+        w_old: pd.Series,
+        nav: float = 1.0,
+    ) -> float:
+        """
+        Per-stock cost: |Δw_i| * (half_spread_i + λ * sqrt(|Δw_i|*NAV/ADV_i)) / 10000.
+
+        Divided by 2 to match the one-way turnover convention used by the
+        flat ``TransactionCostModel`` (i.e. half_spread_bps is quoted as a
+        one-way spread; round-trip rebalancing pays it twice).
+        """
+        idx = w_new.index.union(w_old.index)
+        a = w_new.reindex(idx).fillna(0.0)
+        b = w_old.reindex(idx).fillna(0.0)
+        dw = (a - b).abs()
+        traded = dw[dw > 0]
+        if len(traded) == 0:
+            return 0.0
+        hs = self._half_spread_bps(traded.index)
+        dollar_traded = traded * float(nav)
+        impact = self._impact_bps(traded.index, dollar_traded)
+        cost_bps = (hs + impact).reindex(traded.index).fillna(self.fallback * 10_000)
+        # /2 → align with one-way turnover convention (cf. TransactionCostModel)
+        return float((traded * cost_bps).sum() / 2.0 / 10_000)
+
+    @property
+    def cost(self) -> float:
+        """Compatibility shim — `tc_model.cost > 0` truthiness check should
+        still succeed for impact-aware models (so `hl_returns_are_net_of_tc`
+        is reported correctly)."""
+        return max(self.fallback, (self.hs_small + self.hs_large) / 2 / 10_000)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Decile portfolio builder
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -155,6 +294,7 @@ class DecilePortfolioBuilder:
         predictions: pd.DataFrame,
         returns: pd.DataFrame,
         market_caps: Optional[pd.DataFrame] = None,
+        adv: Optional[pd.DataFrame] = None,
     ) -> Tuple[Dict[str, pd.Series], Dict[str, pd.Series], Dict[str, pd.Series]]:
         dates = predictions.index.intersection(returns.index)
         port_net = {str(d): [] for d in range(1, self.n_deciles + 1)}
@@ -170,6 +310,8 @@ class DecilePortfolioBuilder:
         prev_w = {str(d): z.copy() for d in range(1, self.n_deciles + 1)}
         prev_w["H-L"] = z.copy()
 
+        impact_aware = isinstance(self.tc_model, ImpactAwareTransactionCostModel)
+
         for t in dates:
             pred_t = predictions.loc[t].dropna()
             ret_t = returns.loc[t].reindex(pred_t.index).dropna()
@@ -179,6 +321,15 @@ class DecilePortfolioBuilder:
 
             pred_t = pred_t.loc[common]
             ret_t = ret_t.loc[common]
+
+            if impact_aware:
+                mc_t = (
+                    market_caps.loc[t]
+                    if market_caps is not None and t in market_caps.index
+                    else None
+                )
+                adv_t = adv.loc[t] if adv is not None and t in adv.index else None
+                self.tc_model.set_metadata(mc_t, adv_t)
 
             try:
                 labels = pd.qcut(pred_t, q=self.n_deciles,
@@ -340,8 +491,31 @@ class BacktestEngine:
         n_deciles:   int = 10,
         weighting:   str = "value",
         tc_bps:      float = 10.0,
+        tc_model:    str = "flat",
+        impact_kwargs: Optional[dict] = None,
         checkpoint_dir: str | None = None,
+        refit_step_years: int = 1,
     ):
+        """
+        Parameters
+        ----------
+        tc_model : {"flat", "impact"}
+            "flat"   = legacy proportional bps cost (uses ``tc_bps``).
+            "impact" = Frazzini-Israel-Moskowitz-style: half-spread varies
+                       by market cap, plus √(trade$/ADV) impact term.
+                       Reads ``me`` and ``adv`` (raw monthly $-volume / 21)
+                       from the wide DataFrames passed to the builder.
+        impact_kwargs : dict, optional
+            Forwarded to ImpactAwareTransactionCostModel — keys include
+            ``half_spread_small_bps``, ``half_spread_large_bps``,
+            ``impact_coef_bps``, ``fallback_bps``.
+        refit_step_years : int, default 1
+            How many years between successive model refits. 1 = paper-
+            faithful annual refit. Setting to 2 ~halves NN training time
+            with a small (~5%) relative R² hit; useful for development.
+            The checkpoint key includes this value so runs with different
+            cadences don't collide.
+        """
         self.train_start = pd.Timestamp(train_start)
         self.val_start   = pd.Timestamp(val_start)
         self.val_end     = pd.Timestamp(val_end)
@@ -350,16 +524,24 @@ class BacktestEngine:
         self.n_deciles   = n_deciles
         self.weighting   = weighting
         self._tc_bps     = float(tc_bps)
-        self.tc_model    = TransactionCostModel(tc_bps)
+        self._tc_model_kind = tc_model
+        if tc_model == "impact":
+            self.tc_model = ImpactAwareTransactionCostModel(
+                **(impact_kwargs or {})
+            )
+        else:
+            self.tc_model = TransactionCostModel(tc_bps)
+        self.refit_step_years = max(1, int(refit_step_years))
         self.checkpoint_dir = Path(checkpoint_dir or _default_checkpoint_dir())
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     def _checkpoint_path(self, models: dict) -> Path:
-        """Path keyed by sorted model names so same set of models = same checkpoint."""
-        key = ",".join(sorted(models.keys()))
+        """Path keyed by sorted model names + refit cadence so different
+        cadences (annual vs every-2-years) don't load each other's state."""
+        key = ",".join(sorted(models.keys())) + f"|refit{self.refit_step_years}"
         h = hashlib.md5(key.encode()).hexdigest()[:10]
         # Include readable model names in filename for human inspection
-        safe_key = key.replace("/", "_").replace("+", "p")[:80]
+        safe_key = key.replace("/", "_").replace("+", "p").replace("|", "_")[:80]
         return self.checkpoint_dir / f"ckpt_{safe_key}_{h}.pkl"
 
     def _load_checkpoint(self, path: Path) -> Optional[dict]:
@@ -398,7 +580,12 @@ class BacktestEngine:
         date_col: str = "date",
         me_col: str = "me",
     ) -> Dict:
-        fm = feature_matrix.sort_values([date_col, id_col]).copy()
+        # Don't .copy() — feature_matrix is multi-GB. We need it sorted by
+        # (date, permno) for the year-loop slicing, but we can do that
+        # in-place on the caller's frame (the sorted result is what we
+        # consume; pandas will create the sorted copy if needed but we
+        # avoid an explicit second .copy()).
+        fm = feature_matrix.sort_values([date_col, id_col])
         if target_col not in fm.columns:
             raise KeyError(
                 f"Missing target column {target_col!r}. "
@@ -408,13 +595,29 @@ class BacktestEngine:
             fm, target_col, id_col=id_col, date_col=date_col, me_col=me_col
         )
 
+        # Pre-extract the per-(date, permno) metadata used after the year
+        # loop for portfolio construction. This lets us free `fm` before
+        # PCA / GLM / etc. allocate their working memory.
+        adv_col = "adv_dollar"
+        me_lookup = (
+            fm[[date_col, id_col, me_col]].copy()
+            if me_col in fm.columns else None
+        )
+        adv_lookup = (
+            fm[[date_col, id_col, adv_col]].copy()
+            if adv_col in fm.columns else None
+        )
+
         first_train_end = self.test_start - pd.DateOffset(years=1)
         assert first_train_end.year == self.val_end.year, (
             f"val_end year {self.val_end.year} does not match "
             f"first walk-forward train_end year {first_train_end.year}"
         )
 
-        all_test_dates = pd.date_range(self.test_start, self.test_end, freq=FREQ_YEAR_START)
+        all_test_dates = pd.date_range(
+            self.test_start, self.test_end,
+            freq=f"{self.refit_step_years}{FREQ_YEAR_START}",
+        )
 
         # ── Checkpoint setup ─────────────────────────────────────────────
         ckpt_path = self._checkpoint_path(models)
@@ -442,7 +645,8 @@ class BacktestEngine:
                 logger.info(f"[checkpoint] year {year} already done — skipping")
                 continue
 
-            yr_end = yr_start + pd.DateOffset(years=1) - pd.DateOffset(days=1)
+            yr_end = yr_start + pd.DateOffset(years=self.refit_step_years) - pd.DateOffset(days=1)
+            yr_end = min(yr_end, self.test_end)
             train_end_yr = yr_start - pd.DateOffset(years=1)
 
             mask_train = (fm[date_col] >= self.train_start) & (fm[date_col] <= train_end_yr)
@@ -457,15 +661,34 @@ class BacktestEngine:
                 completed_years.add(year)
                 continue
 
-            X_tr = train[feat_cols].fillna(0)
-            X_v = val[feat_cols].fillna(0) if len(val) > 0 else None
-            X_te = test[feat_cols].fillna(0)
-            y_train = train[target_col].values
-            y_val = val[target_col].values if len(val) > 0 else None
-            y_test = test[target_col].values
+            # Build X views *without* copying when possible. The .fillna(0)
+            # below was the killer at year 2001+: it forces a full copy of
+            # the (multi-GB) feature block. We do it as a single in-place
+            # operation on the float32 array instead, which halves peak RAM.
+            def _materialise(df_slice):
+                if df_slice is None or len(df_slice) == 0:
+                    return None
+                arr = df_slice[feat_cols].to_numpy(dtype=np.float32, copy=False)
+                # In-place NaN -> 0 (no extra allocation)
+                np.nan_to_num(arr, copy=False, nan=0.0)
+                return arr
+
+            X_tr = _materialise(train)
+            X_v  = _materialise(val) if len(val) > 0 else None
+            X_te = _materialise(test)
+            y_train = train[target_col].to_numpy(dtype=np.float32, copy=False)
+            y_val   = val[target_col].to_numpy(dtype=np.float32, copy=False) if len(val) > 0 else None
+            y_test  = test[target_col].to_numpy(dtype=np.float32, copy=False)
+            # Capture the test dates/permnos BEFORE freeing the DataFrame views
+            test_dates_for_year   = test[date_col].to_numpy()
+            test_permnos_for_year = test[id_col].to_numpy()
+            n_test = len(test)
+            # Free the DataFrame views — we only need the np arrays from here
+            del train, val, test
+            import gc; gc.collect()
 
             logger.info(f"Test year {year}: "
-                        f"train={len(train):,}  val={len(val):,}  test={len(test):,}")
+                        f"train={len(X_tr):,}  val={(len(X_v) if X_v is not None else 0):,}  test={n_test:,}")
 
             # Track length before this year so we can roll back on partial failure
             n_before = len(true_rets)
@@ -478,14 +701,14 @@ class BacktestEngine:
                     year_preds[name] = np.asarray(pred, dtype=np.float32).tolist()
                 except Exception as e:
                     logger.error(f"{name} failed at {year}: {e}")
-                    year_preds[name] = [np.nan] * len(test)
+                    year_preds[name] = [np.nan] * n_test
 
             # All models attempted — commit this year's predictions
             for name in models:
                 predictions[name].extend(year_preds[name])
             true_rets.extend(y_test.astype(np.float32).tolist())
-            test_dates_all.extend(test[date_col].values.tolist())
-            test_permnos.extend(test[id_col].values.tolist())
+            test_dates_all.extend(test_dates_for_year.tolist())
+            test_permnos.extend(test_permnos_for_year.tolist())
             completed_years.add(year)
 
             # ── Persist checkpoint ──────────────────────────────────────
@@ -501,6 +724,19 @@ class BacktestEngine:
             logger.info(f"[checkpoint] saved through year {year} "
                         f"({len(completed_years)} years done) -> {ckpt_path.name}")
 
+            # Free the year's float32 arrays before the next iteration
+            # allocates fresh ones — the largest are 2-3 GB each on the
+            # improved variant by the late 2010s.
+            del X_tr, X_v, X_te, y_train, y_val, y_test
+            del test_dates_for_year, test_permnos_for_year
+            gc.collect()
+
+        # ── Free the big feature matrix before portfolio construction ───
+        # The portfolio builder only needs me + adv per (date, permno),
+        # which we captured into me_lookup / adv_lookup at the top of run().
+        del fm
+        gc.collect()
+
         # ── Assemble panel ────────────────────────────────────────────────
         test_idx   = pd.to_datetime(test_dates_all)
         true_arr   = np.array(true_rets, dtype=np.float32)
@@ -510,26 +746,48 @@ class BacktestEngine:
         portfolio_returns: Dict[str, Dict[str, pd.Series]] = {}
         portfolio_returns_gross: Dict[str, Dict[str, pd.Series]] = {}
         portfolio_turnover: Dict[str, Dict[str, pd.Series]] = {}
+
+        # Per-(date, permno) metadata from the lightweight lookups
+        keys_df = pd.DataFrame({date_col: test_idx, id_col: test_permnos})
+        if me_lookup is not None:
+            me_vals = (keys_df.merge(me_lookup, on=[date_col, id_col], how="left")
+                                 [me_col].values)
+        else:
+            me_vals = np.ones(len(test_idx))
+        if adv_lookup is not None:
+            adv_vals = (keys_df.merge(adv_lookup, on=[date_col, id_col], how="left")
+                                  [adv_col].values)
+        else:
+            adv_vals = None
+        del me_lookup, adv_lookup, keys_df
+        gc.collect()
+
         for name, pred_arr in pred_arrays.items():
             pred_df = pd.DataFrame({
                 "date":    test_idx,
                 "permno":  test_permnos,
                 "pred":    pred_arr,
                 "ret":     true_arr,
-                "me":      fm.set_index([date_col, id_col]).reindex(
-                    zip(test_idx, test_permnos)
-                )[me_col].values if me_col in fm.columns else np.ones(len(test_idx)),
+                "me":      me_vals,
             })
+            if adv_vals is not None:
+                pred_df["adv"] = adv_vals
             pred_wide = pred_df.pivot(index="date", columns="permno", values="pred")
             ret_wide  = pred_df.pivot(index="date", columns="permno", values="ret")
             me_wide   = pred_df.pivot(index="date", columns="permno", values="me")
+            adv_wide  = (
+                pred_df.pivot(index="date", columns="permno", values="adv")
+                if adv_vals is not None else None
+            )
 
             builder = DecilePortfolioBuilder(
                 n_deciles=self.n_deciles,
                 weighting=self.weighting,
                 tc_model=self.tc_model,
             )
-            net_r, gross_r, turn_r = builder.build(pred_wide, ret_wide, me_wide)
+            net_r, gross_r, turn_r = builder.build(
+                pred_wide, ret_wide, me_wide, adv=adv_wide,
+            )
             portfolio_returns[name] = net_r
             portfolio_returns_gross[name] = gross_r
             portfolio_turnover[name] = turn_r

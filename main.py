@@ -38,10 +38,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from src.config import FREQ_MONTH_END, FREQ_YEAR_START
+from src.config import FREQ_MONTH_END, FREQ_YEAR_START, get_variant_config
 
 # ── Create required directories before anything else ──────────────────────────
-for _d in ("logs", "data/cache", "outputs", "outputs/models"):
+for _d in ("logs", "data/cache", "outputs",
+           "outputs/paper", "outputs/paper/models",
+           "outputs/improved", "outputs/improved/models",
+           "outputs/models"):
     Path(_d).mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -53,6 +56,39 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Variant resolution helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _resolve_variant(args) -> dict:
+    """
+    Read --variant from args (default 'paper') and return a fully-resolved
+    dict of pipeline settings, with any explicit CLI overrides applied.
+    """
+    name = getattr(args, "variant", "paper") or "paper"
+    cfg = get_variant_config(name)
+    cfg["name"] = name
+
+    # Apply CLI-level overrides if the user passed them
+    overrides = [
+        ("data_start", "data_start"),
+        ("data_end",   "data_end"),
+        ("train_start","train_start"),
+        ("val_start",  "val_start"),
+        ("val_end",    "val_end"),
+        ("test_start", "test_start"),
+        ("test_end",   "test_end"),
+        ("tc_bps",     "tc_bps"),
+    ]
+    for cli, key in overrides:
+        v = getattr(args, cli, None)
+        if v is not None and v != "":
+            cfg[key] = v
+    Path(cfg["output_dir"]).mkdir(parents=True, exist_ok=True)
+    Path(cfg["model_dir"]).mkdir(parents=True, exist_ok=True)
+    return cfg
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,29 +161,60 @@ def _build_macro(start: str, end: str) -> pd.DataFrame:
 
 def run_data_only(args) -> None:
     """Run all data steps (1→4) in one shot, or a single --data-step."""
+    cfg = _resolve_variant(args)
     step = getattr(args, "data_step", "all")
 
     if step == "all" or step == "fetch":
-        _data_step_fetch(args)
+        _data_step_fetch(args, cfg)
     if step == "all" or step == "merge":
-        _data_step_merge()
+        _data_step_merge(cfg)
     if step == "all" or step == "chars":
-        _data_step_chars()
+        _data_step_chars(cfg)
     if step == "all" or step == "features":
-        _data_step_features()
+        _data_step_features(cfg)
 
     if step == "all":
-        logger.info("=== Data-only stage complete (all steps). Run --mode train next. ===")
+        logger.info(
+            f"=== Data-only stage complete (variant='{cfg['name']}'). "
+            f"Run --mode train next. ==="
+        )
 
 
-def _data_step_fetch(args) -> None:
+def _crsp_cache_path(cfg: dict) -> Path:
+    return Path(f"data/cache/crsp_monthly_{cfg['data_start'][:4]}_{cfg['data_end'][:4]}.parquet")
+
+
+def _comp_a_cache_path(cfg: dict) -> Path:
+    return Path(f"data/cache/compustat_annual_{cfg['data_start'][:4]}_{cfg['data_end'][:4]}.parquet")
+
+
+def _merged_panel_path(cfg: dict) -> Path:
+    return Path(f"data/cache/merged_panel_{cfg['name']}.parquet")
+
+
+def _char_panel_path(cfg: dict) -> Path:
+    return Path(f"data/cache/char_panel_{cfg['name']}.parquet")
+
+
+def _char_cols_path(cfg: dict) -> Path:
+    return Path(f"data/cache/char_cols_{cfg['name']}.json")
+
+
+def _feature_matrix_path(cfg: dict) -> Path:
+    return Path(cfg["feature_cache"])
+
+
+def _data_step_fetch(args, cfg: dict) -> None:
     """Step 1: Fetch raw tables from WRDS and cache as parquet, plus build macro from GWZ zip."""
     from src.data.wrds_loader import WRDSLoader
 
-    logger.info("=== Data Step 1/4: Fetching WRDS data ===")
+    logger.info(f"=== Data Step 1/4: Fetching WRDS data "
+                f"({cfg['data_start']} → {cfg['data_end']}) ===")
     loader = WRDSLoader(
         wrds_username=args.wrds_username,
         cache_dir="data/cache/",
+        start_date=cfg["data_start"],
+        end_date=cfg["data_end"],
     )
     loader.get_crsp_monthly()
     loader.get_compustat_annual()
@@ -156,31 +223,39 @@ def _data_step_fetch(args) -> None:
     loader.close()
 
     # Macro predictors come from the GWZ csv zip in data/, not WRDS
-    _build_macro(start=loader.start_date, end=loader.end_date)
+    _build_macro(start=cfg["data_start"], end=cfg["data_end"])
     logger.info("=== Step 1 complete. Cached: crsp, compustat, link, macro ===")
 
 
-def _data_step_merge() -> None:
+def _data_step_merge(cfg: dict) -> None:
     """Step 2: Load cached CRSP + Compustat + link → merged panel."""
     from src.data.wrds_loader import merge_crsp_compustat
 
     logger.info("=== Data Step 2/4: Merging CRSP + Compustat ===")
-    crsp   = pd.read_parquet("data/cache/crsp_monthly_1957_2016.parquet")
-    comp_a = pd.read_parquet("data/cache/compustat_annual_1957_2016.parquet")
+    crsp_path = _crsp_cache_path(cfg)
+    comp_path = _comp_a_cache_path(cfg)
+    if not crsp_path.exists() or not comp_path.exists():
+        raise FileNotFoundError(
+            f"Cached CRSP/Compustat not found at {crsp_path} / {comp_path}. "
+            "Run --data-step fetch first."
+        )
+    crsp   = pd.read_parquet(crsp_path)
+    comp_a = pd.read_parquet(comp_path)
     link   = pd.read_parquet("data/cache/ccm_link.parquet")
 
     panel = merge_crsp_compustat(crsp, comp_a, link, lag_months=6)
-    panel.to_parquet("data/cache/merged_panel.parquet", index=False)
-    logger.info(f"=== Step 2 complete. Merged panel: {panel.shape} ===")
+    out = _merged_panel_path(cfg)
+    panel.to_parquet(out, index=False)
+    logger.info(f"=== Step 2 complete. Merged panel: {panel.shape} → {out} ===")
 
 
-def _data_step_chars() -> None:
+def _data_step_chars(cfg: dict) -> None:
     """Step 3: Load merged panel → build characteristics."""
     from src.data.characteristics import CharacteristicsBuilder
 
     logger.info("=== Data Step 3/4: Building characteristics ===")
-    panel = pd.read_parquet("data/cache/merged_panel.parquet")
-    crsp  = pd.read_parquet("data/cache/crsp_monthly_1957_2016.parquet")
+    panel = pd.read_parquet(_merged_panel_path(cfg))
+    crsp  = pd.read_parquet(_crsp_cache_path(cfg))
 
     mkt_ret = (
         crsp.assign(wret=lambda x: x["ret"] * x["me"].shift(1))
@@ -191,27 +266,62 @@ def _data_step_chars() -> None:
     builder = CharacteristicsBuilder(panel, mkt_ret)
     char_panel = builder.build()
 
-    # Save char_panel + the char_cols list so step 4 can reload
-    char_panel.to_parquet("data/cache/char_panel.parquet", index=False)
+    char_panel.to_parquet(_char_panel_path(cfg), index=False)
     char_cols = builder._get_char_cols(char_panel)
-    with open("data/cache/char_cols.json", "w") as f:
+    with open(_char_cols_path(cfg), "w") as f:
         json.dump(char_cols, f)
-    logger.info(f"=== Step 3 complete. Char panel: {char_panel.shape}, {len(char_cols)} chars ===")
+    logger.info(
+        f"=== Step 3 complete. Char panel: {char_panel.shape}, "
+        f"{len(char_cols)} chars ==="
+    )
 
 
-def _data_step_features() -> None:
+def _data_step_features(cfg: dict) -> None:
     """Step 4: Load char_panel + macro → Kronecker feature matrix."""
     from src.data.characteristics import build_feature_matrix
 
-    logger.info("=== Data Step 4/4: Building feature matrix ===")
-    char_panel = pd.read_parquet("data/cache/char_panel.parquet")
+    logger.info("=== Data Step 4/4: Building feature matrix "
+                f"(macro_interactions={cfg['use_macro_interactions']}) ===")
+    char_panel = pd.read_parquet(_char_panel_path(cfg))
     macro      = pd.read_parquet("data/cache/macro.parquet")
-    with open("data/cache/char_cols.json") as f:
+    with open(_char_cols_path(cfg)) as f:
         char_cols = json.load(f)
 
-    feature_matrix = build_feature_matrix(char_panel, macro, char_cols)
-    feature_matrix.to_parquet("data/cache/feature_matrix.parquet", index=False)
-    logger.info(f"=== Step 4 complete. Feature matrix: {feature_matrix.shape} ===")
+    if cfg["use_macro_interactions"]:
+        feature_matrix = build_feature_matrix(char_panel, macro, char_cols)
+    else:
+        # No macro interactions: only the constant block of features
+        # (= raw characteristics) and SIC dummies if enabled.
+        feature_matrix = build_feature_matrix(
+            char_panel, macro, char_cols, macro_cols=[]
+        )
+
+    if not cfg["use_industry_dummies"]:
+        feature_matrix = feature_matrix.loc[
+            :, [c for c in feature_matrix.columns if not c.startswith("sic2_")]
+        ]
+
+    # ── Attach raw $-volume for impact-aware TC. ADV = monthly $-volume / 21.
+    # We carry it on the feature matrix as ``adv_dollar`` so the engine can
+    # pivot to a wide frame at evaluation time without re-loading char_panel.
+    if "prc" in char_panel.columns and "vol" in char_panel.columns:
+        adv = (
+            char_panel[["permno", "date", "prc", "vol"]]
+            .assign(adv_dollar=lambda d: (d["prc"].abs() * d["vol"] * 1000.0 / 21.0))
+            [["permno", "date", "adv_dollar"]]
+        )
+        feature_matrix = feature_matrix.merge(adv, on=["permno", "date"], how="left")
+        logger.info(f"Attached adv_dollar (monthly$/21). "
+                    f"Coverage: {feature_matrix['adv_dollar'].notna().mean():.1%}")
+    else:
+        logger.info("prc/vol not in char_panel — adv_dollar not attached "
+                    "(impact-aware TC will fall back to flat fallback bps).")
+
+    out = _feature_matrix_path(cfg)
+    feature_matrix.to_parquet(out, index=False)
+    logger.info(
+        f"=== Step 4 complete. Feature matrix: {feature_matrix.shape} → {out} ==="
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -221,31 +331,123 @@ def _data_step_features() -> None:
 def run_train(args) -> dict:
     """
     Load cached feature matrix, run backtest for --models subset,
-    save each model's results to outputs/models/<name>.pkl so that
-    results accumulate across runtime restarts.
+    save each model's results to outputs/<variant>/models/<name>.pkl
+    so that results accumulate across runtime restarts.
     """
-    cache = Path("data/cache/feature_matrix.parquet")
+    cfg = _resolve_variant(args)
+    cache = _feature_matrix_path(cfg)
     if not cache.exists():
         raise FileNotFoundError(
-            "No cached feature matrix. Run --mode data-only or --mode full first."
+            f"No cached feature matrix at {cache}. "
+            f"Run --mode data-only --variant {cfg['name']} first."
         )
     feature_matrix = pd.read_parquet(cache)
-    return _run_backtest(feature_matrix, args, save_per_model=True)
+    return _run_backtest(feature_matrix, args, cfg, save_per_model=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Evaluate mode — merge all per-model results and produce tables
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_evaluate(args) -> dict:
-    """Load all per-model .pkl files from outputs/models/ and produce tables."""
-    from src.evaluation.metrics import ModelEvaluator
+def _build_portfolios_for_predictions(
+    predictions: dict,
+    true_returns,
+    test_dates,
+    test_permnos,
+    cfg: dict,
+) -> dict:
+    """
+    Given a dict of {name: 1D pred array}, construct decile portfolios and
+    return per-name {"net","gross","turnover","metrics"}. Used by
+    ``run_evaluate`` to add ensemble portfolios after merging per-model
+    pickles. Re-uses the variant's transaction cost configuration so the
+    ensemble portfolios are scored on the same TC basis as the constituents.
+    """
+    import numpy as np
+    from src.backtest.engine import (
+        DecilePortfolioBuilder, TransactionCostModel,
+        ImpactAwareTransactionCostModel,
+    )
+    from src.evaluation.metrics import oos_r2, sharpe_ratio
 
-    model_dir = Path("outputs/models")
+    # Reload feature matrix to get me/adv at test rows
+    fm = pd.read_parquet(_feature_matrix_path(cfg))
+    fm_idx = fm.set_index(["date", "permno"])
+    keys = list(zip(pd.to_datetime(test_dates), test_permnos))
+    me_vals = (
+        fm_idx["me"].reindex(keys).values if "me" in fm.columns
+        else np.ones(len(test_dates))
+    )
+    adv_vals = (
+        fm_idx["adv_dollar"].reindex(keys).values
+        if "adv_dollar" in fm.columns else None
+    )
+
+    # Build TC model identical to the one engine.run used
+    if cfg.get("tc_model") == "impact":
+        tc_model = ImpactAwareTransactionCostModel()
+    else:
+        tc_model = TransactionCostModel(cost_bps=float(cfg["tc_bps"]))
+
+    out = {}
+    for name, pred in predictions.items():
+        df = pd.DataFrame({
+            "date":   pd.to_datetime(test_dates),
+            "permno": test_permnos,
+            "pred":   pred,
+            "ret":    true_returns,
+            "me":     me_vals,
+        })
+        if adv_vals is not None:
+            df["adv"] = adv_vals
+        pred_wide = df.pivot(index="date", columns="permno", values="pred")
+        ret_wide  = df.pivot(index="date", columns="permno", values="ret")
+        me_wide   = df.pivot(index="date", columns="permno", values="me")
+        adv_wide  = (df.pivot(index="date", columns="permno", values="adv")
+                     if adv_vals is not None else None)
+        builder = DecilePortfolioBuilder(
+            n_deciles=10, weighting="value", tc_model=tc_model,
+        )
+        net, gross, turn = builder.build(pred_wide, ret_wide, me_wide, adv=adv_wide)
+
+        # Quick metrics
+        valid = ~np.isnan(pred) & ~np.isnan(np.asarray(true_returns, dtype=float))
+        r2 = oos_r2(np.asarray(true_returns)[valid], np.asarray(pred)[valid]) * 100
+        hl_n = net.get("H-L", pd.Series(dtype=float)).dropna()
+        hl_g = gross.get("H-L", pd.Series(dtype=float)).dropna()
+        hl_t = turn.get("H-L", pd.Series(dtype=float)).dropna()
+        sr_n = sharpe_ratio(hl_n) if len(hl_n) else float("nan")
+        sr_g = sharpe_ratio(hl_g) if len(hl_g) else float("nan")
+        to_m = float(hl_t.mean()) if len(hl_t) else float("nan")
+        out[name] = {
+            "net": net, "gross": gross, "turnover": turn,
+            "metrics": {
+                "oos_r2_pct": round(r2, 3),
+                "hl_sharpe": round(sr_n, 3) if sr_n == sr_n else float("nan"),
+                "hl_sharpe_gross": round(sr_g, 3) if sr_g == sr_g else float("nan"),
+                "hl_mean_turnover_one_way": round(to_m, 6) if to_m == to_m else float("nan"),
+                "hl_engine_tc_bps": cfg["tc_bps"],
+                "hl_returns_are_net_of_tc": cfg["tc_bps"] > 0 or cfg.get("tc_model") == "impact",
+                "is_ensemble": True,
+            },
+        }
+    return out
+
+
+def run_evaluate(args) -> dict:
+    """Load all per-model .pkl files from outputs/<variant>/models/ and produce tables."""
+    from src.evaluation.metrics import (
+        ModelEvaluator, dm_table_full, sharpe_ratio,
+    )
+
+    cfg = _resolve_variant(args)
+    out_dir = Path(cfg["output_dir"])
+    model_dir = Path(cfg["model_dir"])
     pkls = sorted(model_dir.glob("*.pkl"))
     if not pkls:
         raise FileNotFoundError(
-            "No model results found in outputs/models/. Run --mode train first."
+            f"No model results found in {model_dir}. "
+            f"Run --mode train --variant {cfg['name']} first."
         )
 
     # Merge all per-model results
@@ -256,6 +458,7 @@ def run_evaluate(args) -> dict:
     metrics = {}
     true_returns = None
     test_dates = None
+    test_permnos = None
 
     for p in pkls:
         with open(p, "rb") as f:
@@ -268,15 +471,40 @@ def run_evaluate(args) -> dict:
         if "portfolio_turnover" in res:
             portfolio_turnover[name] = res["portfolio_turnover"]
         metrics[name] = res["metrics"]
-        # true_returns / test_dates are identical across models
         if true_returns is None:
             true_returns = res["true_returns"]
             test_dates = res["test_dates"]
+            test_permnos = res.get("test_permnos")
 
     logger.info(
-        f"Loaded results for {len(predictions)} models: "
+        f"[variant={cfg['name']}] Loaded results for {len(predictions)} models: "
         f"{list(predictions.keys())}"
     )
+
+    # ── Forecast combinations: ENS-AVG and ENS-MSE ──────────────────────────
+    skip_ensembles = bool(getattr(args, "no_ensembles", False))
+    ens_meta: dict = {}
+    if not skip_ensembles and len(predictions) >= 2:
+        from src.evaluation.combinations import build_ensembles
+        predictions, ens_meta = build_ensembles(
+            predictions, y_true=true_returns, dates=test_dates,
+            which=("avg", "mse"),
+        )
+        # Build portfolios for each new ensemble using the same engine logic
+        ens_names = [n for n in predictions if n in ("ENS-AVG", "ENS-MSE")]
+        if ens_names:
+            ens_pf = _build_portfolios_for_predictions(
+                {n: predictions[n] for n in ens_names},
+                true_returns=true_returns,
+                test_dates=test_dates,
+                test_permnos=test_permnos,
+                cfg=cfg,
+            )
+            for n, pf in ens_pf.items():
+                portfolio_returns[n]       = pf["net"]
+                portfolio_returns_gross[n] = pf["gross"]
+                portfolio_turnover[n]      = pf["turnover"]
+                metrics[n] = pf["metrics"]
 
     for name in portfolio_returns:
         portfolio_returns_gross.setdefault(name, portfolio_returns[name])
@@ -289,95 +517,114 @@ def run_evaluate(args) -> dict:
         portfolio_returns=portfolio_returns,
     )
 
-    r2_table  = evaluator.oos_r2_table()
-    sr_table  = evaluator.sharpe_table()
-    dm_matrix = evaluator.dm_table()
+    r2_table   = evaluator.oos_r2_table()
+    sr_table   = evaluator.sharpe_table()
+    dm_stats, dm_pvals = dm_table_full(true_returns, predictions, test_dates)
+
+    # Equal-weighted "market" proxy: cross-sectional mean realised return per date
+    mkt_proxy = (
+        pd.DataFrame({"date": test_dates, "ret": true_returns})
+          .groupby("date")["ret"].mean()
+    )
+
+    comprehensive = evaluator.comprehensive_table(
+        portfolio_returns_gross=portfolio_returns_gross,
+        portfolio_turnover=portfolio_turnover,
+        market_factor=mkt_proxy,
+    )
 
     logger.info("\n" + "=" * 60)
-    logger.info("OOS R² Table (%):")
-    logger.info("\n" + r2_table.to_string())
-    logger.info("\nH-L Sharpe Ratios:")
-    logger.info("\n" + sr_table.to_string())
+    logger.info(f"[variant={cfg['name']}] Comprehensive performance:")
+    logger.info("\n" + comprehensive.to_string())
 
-    r2_table.to_csv("outputs/oos_r2.csv")
-    sr_table.to_csv("outputs/sharpe_table.csv")
-    dm_matrix.to_csv("outputs/dm_table.csv")
+    # ── Save outputs ────────────────────────────────────────────────────────
+    r2_table.to_csv(out_dir / "oos_r2.csv")
+    sr_table.to_csv(out_dir / "sharpe_table.csv")
+    dm_stats.to_csv(out_dir / "dm_table.csv")
+    dm_pvals.to_csv(out_dir / "dm_pvalues.csv")
+    comprehensive.to_csv(out_dir / "comprehensive.csv")
 
     from src.reporting.portfolio_io import save_portfolio_bundle
 
     reporting_meta = {
+        "variant": cfg["name"],
+        "tc_bps": cfg["tc_bps"],
+        "tc_model": cfg.get("tc_model", "flat"),
+        "data_start": cfg["data_start"],
+        "data_end": cfg["data_end"],
+        "test_start": cfg["test_start"],
+        "test_end": cfg["test_end"],
+        "use_macro_interactions": cfg["use_macro_interactions"],
+        "use_industry_dummies": cfg["use_industry_dummies"],
         "portfolio_pickle_format": "bundle_v1",
         "primary_hl_series": "net_of_engine_transaction_costs",
-        "note": (
-            "H-L in bundle['net'] reflects engine TC when tc_bps>0. "
-            "Use bundle['gross'] and per-model hl_sharpe_gross for pre-cost performance."
-        ),
+        "hl_engine_tc_bps_default": cfg["tc_bps"],
+        "hl_returns_are_net_of_engine_tc": cfg["tc_bps"] > 0 or cfg.get("tc_model") == "impact",
     }
-    if metrics:
-        sample = next(iter(metrics.values()))
-        reporting_meta["hl_engine_tc_bps_default"] = sample.get("hl_engine_tc_bps", 0.0)
-        reporting_meta["hl_returns_are_net_of_engine_tc"] = bool(
-            sample.get("hl_returns_are_net_of_tc", False)
-        )
     metrics_out = dict(metrics)
     metrics_out["_reporting"] = reporting_meta
+    if ens_meta:
+        metrics_out["_ensembles"] = ens_meta
 
-    with open("outputs/metrics.json", "w") as f:
+    with open(out_dir / "metrics.json", "w") as f:
         json.dump(metrics_out, f, indent=2, default=str)
 
     save_portfolio_bundle(
-        "outputs/portfolio_returns.pkl",
+        out_dir / "portfolio_returns.pkl",
         portfolio_returns,
         portfolio_returns_gross,
         portfolio_turnover,
     )
 
-    logger.info("All outputs saved to outputs/")
+    logger.info(f"All outputs saved to {out_dir}/")
     return {
         "predictions": predictions,
         "true_returns": true_returns,
         "test_dates": test_dates,
+        "test_permnos": test_permnos,
         "portfolio_returns": portfolio_returns,
         "metrics": metrics,
         "evaluator": evaluator,
         "r2_table": r2_table,
         "sr_table": sr_table,
-        "dm_matrix": dm_matrix,
+        "dm_matrix": dm_stats,
+        "dm_pvalues": dm_pvals,
+        "comprehensive": comprehensive,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Full WRDS pipeline (original — data + train + evaluate in one shot)
+#  Full WRDS pipeline — data + train + evaluate in one shot (variant-aware)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_full_pipeline(args) -> dict:
     from src.data.wrds_loader import WRDSLoader, merge_crsp_compustat
     from src.data.characteristics import CharacteristicsBuilder, build_feature_matrix
 
+    cfg = _resolve_variant(args)
     Path("logs").mkdir(parents=True, exist_ok=True)
     Path("data/cache").mkdir(parents=True, exist_ok=True)
-    Path("outputs/models").mkdir(parents=True, exist_ok=True)
+    Path(cfg["model_dir"]).mkdir(parents=True, exist_ok=True)
 
-    # ── 1. Load raw data from WRDS ──────────────────────────────────────────
-    logger.info("=== Step 1: Loading WRDS data ===")
+    variant = cfg["name"]
+    logger.info(f"=== Step 1: Loading WRDS data (variant={variant!r}) ===")
     loader = WRDSLoader(
         wrds_username=args.wrds_username,
         cache_dir="data/cache/",
+        start_date=cfg["data_start"],
+        end_date=cfg["data_end"],
     )
     crsp   = loader.get_crsp_monthly()
     comp_a = loader.get_compustat_annual()
-    comp_q = loader.get_compustat_quarterly()
+    _      = loader.get_compustat_quarterly()
     link   = loader.get_crsp_compustat_link()
     loader.close()
 
-    # Macro predictors come from the GWZ csv zip in data/, not WRDS
-    macro = _build_macro(start=loader.start_date, end=loader.end_date)
+    macro = _build_macro(start=cfg["data_start"], end=cfg["data_end"])
 
-    # ── 2. Merge Compustat onto CRSP ────────────────────────────────────────
     logger.info("=== Step 2: Merging CRSP + Compustat ===")
     panel = merge_crsp_compustat(crsp, comp_a, link, lag_months=6)
 
-    # ── 3. Build characteristics ────────────────────────────────────────────
     logger.info("=== Step 3: Building characteristics ===")
     mkt_ret = (
         crsp.assign(wret=lambda x: x["ret"] * x["me"].shift(1))
@@ -388,51 +635,64 @@ def run_full_pipeline(args) -> dict:
     builder = CharacteristicsBuilder(panel, mkt_ret)
     char_panel = builder.build()
 
-    # ── 4. Build feature matrix (Kronecker product) ────────────────────────
     logger.info("=== Step 4: Building feature matrix ===")
     char_cols = builder._get_char_cols(char_panel)
-    feature_matrix = build_feature_matrix(char_panel, macro, char_cols)
-    feature_matrix.to_parquet("data/cache/feature_matrix.parquet", index=False)
+    macro_cols_arg = None if cfg["use_macro_interactions"] else []
+    feature_matrix = build_feature_matrix(
+        char_panel, macro, char_cols, macro_cols=macro_cols_arg
+    )
+    if not cfg["use_industry_dummies"]:
+        feature_matrix = feature_matrix.loc[
+            :, [c for c in feature_matrix.columns if not c.startswith("sic2_")]
+        ]
+    feature_matrix.to_parquet(_feature_matrix_path(cfg), index=False)
     logger.info(f"Feature matrix: {feature_matrix.shape}")
 
-    return _run_backtest(feature_matrix, args, save_per_model=False)
+    return _run_backtest(feature_matrix, args, cfg, save_per_model=False)
 
 
 def run_test_pipeline(args) -> dict:
     """Run pipeline with synthetic data (no WRDS needed)."""
+    cfg = _resolve_variant(args)
     Path("logs").mkdir(parents=True, exist_ok=True)
     Path("data/cache").mkdir(parents=True, exist_ok=True)
-    Path("outputs").mkdir(parents=True, exist_ok=True)
+    Path(cfg["output_dir"]).mkdir(parents=True, exist_ok=True)
 
     logger.info("=== Running TEST PIPELINE with synthetic data ===")
-    feature_matrix = generate_synthetic_data(n_stocks=200)
-    feature_matrix.to_parquet("data/cache/feature_matrix.parquet", index=False)
-    return _run_backtest(feature_matrix, args, save_per_model=False)
+    feature_matrix = generate_synthetic_data(
+        n_stocks=200,
+        start=cfg["data_start"],
+        end=cfg["data_end"],
+    )
+    feature_matrix.to_parquet(_feature_matrix_path(cfg), index=False)
+    return _run_backtest(feature_matrix, args, cfg, save_per_model=False)
 
 
 def run_from_cache(args) -> dict:
     """Load cached feature matrix and run backtest."""
-    cache = Path("data/cache/feature_matrix.parquet")
+    cfg = _resolve_variant(args)
+    cache = _feature_matrix_path(cfg)
     if not cache.exists():
         raise FileNotFoundError(
-            "No cached feature matrix found. Run --mode full or --mode test first."
+            f"No cached feature matrix at {cache}. "
+            f"Run --mode full or --mode test --variant {cfg['name']} first."
         )
     feature_matrix = pd.read_parquet(cache)
-    return _run_backtest(feature_matrix, args, save_per_model=False)
+    return _run_backtest(feature_matrix, args, cfg, save_per_model=False)
 
 
 def _run_backtest(
     feature_matrix: pd.DataFrame,
     args,
+    cfg: dict,
     save_per_model: bool = False,
 ) -> dict:
     from src.models.all_models import get_all_models
     from src.backtest.engine import BacktestEngine, add_forward_return_target
-    from src.evaluation.metrics import ModelEvaluator
+    from src.evaluation.metrics import ModelEvaluator, dm_table_full
 
     feature_matrix = add_forward_return_target(feature_matrix)
 
-    # ── 5. Initialise models ────────────────────────────────────────────────
     logger.info("=== Step 5: Initialising models ===")
     nn_kwargs = {
         "batch_size": 10000,
@@ -444,9 +704,8 @@ def _run_backtest(
     if hasattr(args, "models") and args.models:
         models = {k: v for k, v in models.items() if k in args.models}
 
-    # Skip models whose final pickles already exist (use --force-retrain to override)
     if not getattr(args, "force_retrain", False):
-        model_dir = Path("outputs/models")
+        model_dir = Path(cfg["model_dir"])
         already_done = {p.stem for p in model_dir.glob("*.pkl")}
         skipped = [k for k in models if k in already_done]
         if skipped:
@@ -459,29 +718,29 @@ def _run_backtest(
 
     logger.info(f"Models: {list(models.keys())}")
 
-    # ── 6. Backtest ─────────────────────────────────────────────────────────
     logger.info("=== Step 6: Running recursive backtest ===")
+    ckpt_dir = (
+        getattr(args, "checkpoint_dir", None)
+        or f"data/cache/{cfg['checkpoint_subdir']}"
+    )
     engine = BacktestEngine(
-        train_start=getattr(args, "train_start", "1957-03-01"),
-        val_start=getattr(args, "val_start", "1975-01-01"),
-        val_end=getattr(args, "val_end", "1986-12-31"),
-        test_start=getattr(args, "test_start", "1987-01-01"),
-        test_end=getattr(args, "test_end", "2016-12-31"),
+        train_start=cfg["train_start"],
+        val_start=cfg["val_start"],
+        val_end=cfg["val_end"],
+        test_start=cfg["test_start"],
+        test_end=cfg["test_end"],
         n_deciles=10,
         weighting="value",
-        tc_bps=float(getattr(args, "tc_bps", 10.0)),
-        checkpoint_dir=getattr(
-            args,
-            "checkpoint_dir",
-            "data/cache/backtest_checkpoint",
-        ),
+        tc_bps=float(cfg["tc_bps"]),
+        tc_model=cfg.get("tc_model", "flat"),
+        refit_step_years=int(getattr(args, "refit_step_years", None) or 1),
+        checkpoint_dir=ckpt_dir,
     )
 
     results = engine.run(feature_matrix, models)
 
-    # ── Save per-model results (for incremental train mode) ─────────────────
     if save_per_model:
-        model_dir = Path("outputs/models")
+        model_dir = Path(cfg["model_dir"])
         model_dir.mkdir(parents=True, exist_ok=True)
         for name in models:
             model_result = {
@@ -493,20 +752,20 @@ def _run_backtest(
                 "portfolio_returns_gross": results["portfolio_returns_gross"][name],
                 "portfolio_turnover": results["portfolio_turnover"][name],
                 "metrics":           results["metrics"][name],
+                "variant":           cfg["name"],
             }
             out_path = model_dir / f"{name}.pkl"
             with open(out_path, "wb") as f:
                 pickle.dump(model_result, f)
-            logger.info(f"Saved {name} → {out_path}")
+            logger.info(f"Saved {name} -> {out_path}")
 
-        logger.info("=== Train stage complete. Results saved per-model. ===")
-        logger.info(
-            "Existing model results in outputs/models/: "
-            f"{[p.stem for p in sorted(model_dir.glob('*.pkl'))]}"
-        )
+        variant = cfg["name"]
+        logger.info(f"=== Train stage complete (variant={variant!r}). ===")
+        existing = [p.stem for p in sorted(model_dir.glob("*.pkl"))]
+        logger.info(f"Existing model results in {model_dir}: {existing}")
         return results
 
-    # ── 7. Evaluate ─────────────────────────────────────────────────────────
+    # In-line evaluate (full / cache / test modes)
     logger.info("=== Step 7: Evaluating ===")
     evaluator = ModelEvaluator(
         y_true=results["true_returns"],
@@ -515,50 +774,279 @@ def _run_backtest(
         portfolio_returns=results["portfolio_returns"],
     )
 
-    r2_table  = evaluator.oos_r2_table()
-    sr_table  = evaluator.sharpe_table()
-    dm_matrix = evaluator.dm_table()
+    r2_table = evaluator.oos_r2_table()
+    sr_table = evaluator.sharpe_table()
+    dm_stats, dm_pvals = dm_table_full(
+        results["true_returns"], results["predictions"], results["test_dates"],
+    )
 
-    logger.info("\n" + "=" * 60)
-    logger.info("OOS R² Table (%):")
-    logger.info("\n" + r2_table.to_string())
-    logger.info("\nH-L Sharpe Ratios:")
-    logger.info("\n" + sr_table.to_string())
+    mkt_proxy = (
+        pd.DataFrame({
+            "date": results["test_dates"],
+            "ret":  results["true_returns"],
+        }).groupby("date")["ret"].mean()
+    )
+    comprehensive = evaluator.comprehensive_table(
+        portfolio_returns_gross=results["portfolio_returns_gross"],
+        portfolio_turnover=results["portfolio_turnover"],
+        market_factor=mkt_proxy,
+    )
 
-    # ── 8. Save outputs ─────────────────────────────────────────────────────
-    logger.info("=== Step 8: Saving outputs ===")
-    Path("outputs").mkdir(parents=True, exist_ok=True)
+    out_dir = Path(cfg["output_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    r2_table.to_csv("outputs/oos_r2.csv")
-    sr_table.to_csv("outputs/sharpe_table.csv")
-    dm_matrix.to_csv("outputs/dm_table.csv")
+    r2_table.to_csv(out_dir / "oos_r2.csv")
+    sr_table.to_csv(out_dir / "sharpe_table.csv")
+    dm_stats.to_csv(out_dir / "dm_table.csv")
+    dm_pvals.to_csv(out_dir / "dm_pvalues.csv")
+    comprehensive.to_csv(out_dir / "comprehensive.csv")
 
     from src.reporting.portfolio_io import save_portfolio_bundle
 
     metrics_out = dict(results["metrics"])
-    sample = next(iter(metrics_out.values())) if metrics_out else {}
     metrics_out["_reporting"] = {
+        "variant": cfg["name"],
+        "tc_bps": cfg["tc_bps"],
+        "tc_model": cfg.get("tc_model", "flat"),
+        "data_start": cfg["data_start"],
+        "data_end": cfg["data_end"],
+        "test_start": cfg["test_start"],
+        "test_end": cfg["test_end"],
+        "use_macro_interactions": cfg["use_macro_interactions"],
+        "use_industry_dummies": cfg["use_industry_dummies"],
         "portfolio_pickle_format": "bundle_v1",
         "primary_hl_series": "net_of_engine_transaction_costs",
-        "hl_engine_tc_bps_default": sample.get("hl_engine_tc_bps", 0.0),
-        "hl_returns_are_net_of_engine_tc": bool(sample.get("hl_returns_are_net_of_tc", False)),
+        "hl_engine_tc_bps_default": cfg["tc_bps"],
+        "hl_returns_are_net_of_engine_tc": cfg["tc_bps"] > 0 or cfg.get("tc_model") == "impact",
     }
-    with open("outputs/metrics.json", "w") as f:
+    with open(out_dir / "metrics.json", "w") as f:
         json.dump(metrics_out, f, indent=2, default=str)
 
     save_portfolio_bundle(
-        "outputs/portfolio_returns.pkl",
+        out_dir / "portfolio_returns.pkl",
         results["portfolio_returns"],
         results["portfolio_returns_gross"],
         results["portfolio_turnover"],
     )
 
-    logger.info("Outputs saved to outputs/")
-    results["evaluator"]  = evaluator
-    results["r2_table"]   = r2_table
-    results["sr_table"]   = sr_table
-    results["dm_matrix"]  = dm_matrix
+    logger.info(f"Outputs saved to {out_dir}/")
+    results["evaluator"]     = evaluator
+    results["r2_table"]      = r2_table
+    results["sr_table"]      = sr_table
+    results["dm_matrix"]     = dm_stats
+    results["dm_pvalues"]    = dm_pvals
+    results["comprehensive"] = comprehensive
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Importance mode — fit each model on train+val and compute variable
+#  importance on a test slice, save per-variant CSVs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_importance(args) -> dict:
+    """
+    Fit each requested model on the train+val window, compute variable
+    importance on a slice of the test data, aggregate the 920 Kronecker
+    features back to the 94 base characteristics, and save the results
+    to outputs/<variant>/var_importance.csv.
+
+    This is a separate stage from --mode train because it needs a single
+    fitted model per name (whereas the backtest engine refits each year
+    and discards the model). For computational reasons we fit on the
+    initial train+val window only — this matches the variable-importance
+    convention used in GKX (2019, Figure 6).
+    """
+    from src.models.all_models import get_all_models
+    from src.backtest.engine import add_forward_return_target, feature_columns_for_training
+    from src.evaluation.var_importance import (
+        zero_set_importance, permutation_importance,
+        aggregate_to_base_chars, fit_for_importance,
+    )
+
+    cfg = _resolve_variant(args)
+    cache = _feature_matrix_path(cfg)
+    if not cache.exists():
+        raise FileNotFoundError(
+            f"No cached feature matrix at {cache}. "
+            f"Run --mode data-only --variant {cfg['name']} first."
+        )
+
+    fm = pd.read_parquet(cache)
+    fm = add_forward_return_target(fm)
+
+    # Determine fit window
+    fit_end = pd.Timestamp(args.importance_fit_end or cfg["val_end"])
+    train_start = pd.Timestamp(cfg["train_start"])
+    val_start   = pd.Timestamp(cfg["val_start"])
+    test_start  = pd.Timestamp(cfg["test_start"])
+
+    feat_cols = feature_columns_for_training(fm, "ret_fwd")
+    train_mask = (fm["date"] >= train_start) & (fm["date"] < val_start)
+    val_mask   = (fm["date"] >= val_start) & (fm["date"] <= fit_end)
+    test_mask  = (fm["date"] >= test_start) & (fm["date"] <= pd.Timestamp(cfg["test_end"]))
+
+    train = fm[train_mask].dropna(subset=["ret_fwd"])
+    val   = fm[val_mask].dropna(subset=["ret_fwd"])
+    test  = fm[test_mask].dropna(subset=["ret_fwd"])
+
+    if len(train) == 0 or len(test) == 0:
+        raise RuntimeError(
+            f"Empty train ({len(train)}) or test ({len(test)}) slice. "
+            "Check date ranges in the variant config."
+        )
+
+    # Subsample test for speed (importance with 100+ models * 920 features
+    # otherwise blows up). Stratify by date to keep cross-sectional structure.
+    rng = np.random.default_rng(42)
+    if len(test) > 200_000:
+        sample_dates = test["date"].drop_duplicates().sample(
+            n=min(60, test["date"].nunique()), random_state=42
+        )
+        test = test[test["date"].isin(sample_dates)]
+        logger.info(f"Subsampled importance test slice to {len(test):,} rows "
+                    f"({len(sample_dates)} dates)")
+
+    X_tr = train[feat_cols].fillna(0)
+    y_tr = train["ret_fwd"].values
+    X_v  = val[feat_cols].fillna(0) if len(val) > 0 else None
+    y_v  = val["ret_fwd"].values if len(val) > 0 else None
+    X_te = test[feat_cols].fillna(0)
+    y_te = test["ret_fwd"].values
+
+    # Models to evaluate
+    models = get_all_models(nn_kwargs={
+        "batch_size": 10000, "max_epochs": 50, "patience": 5, "n_ensemble": 3,
+    })
+    if args.models:
+        models = {k: v for k, v in models.items() if k in args.models}
+
+    # Trained model objects only exist after we re-fit. To save time and
+    # keep this orthogonal to --mode train, we always refit here.
+    logger.info(
+        f"=== Variable importance: fitting {len(models)} model(s) on "
+        f"{train_start.date()} -> {fit_end.date()} "
+        f"(train={len(train):,}, val={len(val):,}, test_slice={len(test):,}) ==="
+    )
+
+    # Read base characteristics list
+    char_cols_path = _char_cols_path(cfg)
+    if char_cols_path.exists():
+        with open(char_cols_path) as f:
+            base_chars = json.load(f)
+    else:
+        # Synthetic / fallback
+        base_chars = [c.replace("_const", "") for c in feat_cols if c.endswith("_const")]
+        if not base_chars:
+            base_chars = list(feat_cols)
+
+    out_dir = Path(cfg["output_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    importance_method = args.importance_method
+    importance_fn = (
+        zero_set_importance if importance_method == "zero" else permutation_importance
+    )
+
+    all_imp_base = {}
+    all_imp_full = {}
+    for name, model in models.items():
+        logger.info(f"[importance] fitting {name}...")
+        try:
+            fitted = fit_for_importance(model, X_tr, y_tr, X_v, y_v)
+            logger.info(f"[importance] computing {importance_method} importance for {name}...")
+            imp_full = importance_fn(fitted, X_te.copy(), y_te, feature_names=feat_cols)
+            imp_base = aggregate_to_base_chars(imp_full, base_chars)
+            all_imp_full[name] = imp_full
+            all_imp_base[name] = imp_base
+            # Also save per-model on disk for reproducibility
+            imp_full.to_csv(out_dir / f"var_importance_full_{name}.csv",
+                            header=["importance"])
+            imp_base.to_csv(out_dir / f"var_importance_{name}.csv",
+                            header=["importance"])
+            logger.info(f"[importance] {name}: top-5 = "
+                        f"{imp_base.head(5).to_dict()}")
+        except Exception as e:
+            logger.exception(f"[importance] {name} failed: {e}")
+            continue
+
+    # Combined wide table: base chars × models
+    if all_imp_base:
+        combined = pd.DataFrame(all_imp_base)
+        # Normalise per column (so each model sums to 1) for cross-model comparison
+        combined_norm = combined.div(combined.abs().sum(axis=0).replace(0, np.nan), axis=1)
+        combined.to_csv(out_dir / "var_importance.csv")
+        combined_norm.to_csv(out_dir / "var_importance_normalised.csv")
+        logger.info(f"Saved combined importance: {out_dir / 'var_importance.csv'}")
+
+    return {"importance_base": all_imp_base, "importance_full": all_imp_full}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Regimes mode — regime-conditional evaluation (NBER, VIX, decades)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_regimes(args) -> dict:
+    """
+    Slice each model's H-L return series by:
+      * NBER recession vs expansion
+      * VIX terciles (low / mid / high implied vol)
+      * Decade (1990s / 2000s / 2010s / 2020s)
+    and write a long-format ``regimes.csv`` to outputs/<variant>/.
+
+    Reads per-model pickles from outputs/<variant>/models/, then loads
+    the saved portfolio bundle from outputs/<variant>/portfolio_returns.pkl
+    if available — that bundle includes any ENS-AVG / ENS-MSE portfolios
+    that ``run_evaluate`` constructed earlier.
+    """
+    from src.evaluation.regimes import evaluate_regimes
+    from src.reporting.portfolio_io import unpack_portfolio_bundle
+
+    cfg = _resolve_variant(args)
+    out_dir = Path(cfg["output_dir"])
+    bundle_path = out_dir / "portfolio_returns.pkl"
+    if not bundle_path.exists():
+        raise FileNotFoundError(
+            f"No portfolio bundle at {bundle_path}. "
+            f"Run --mode evaluate --variant {cfg['name']} first."
+        )
+
+    with open(bundle_path, "rb") as f:
+        raw = pickle.load(f)
+    net, gross, _turn, _meta = unpack_portfolio_bundle(raw)
+    if not net:
+        raise RuntimeError("Portfolio bundle is empty. Re-run --mode evaluate.")
+
+    # Recover the test_dates from any model's H-L series
+    sample = next(iter(net.values())).get("H-L")
+    if sample is None or len(sample) == 0:
+        raise RuntimeError("Could not find H-L series in portfolio bundle.")
+    test_dates = pd.DatetimeIndex(sample.dropna().index).sort_values()
+
+    vix_path = getattr(args, "vix_csv", None)
+    df = evaluate_regimes(
+        portfolio_returns=net,
+        portfolio_returns_gross=gross or net,
+        test_dates=test_dates,
+        vix_path=vix_path,
+    )
+
+    out_path = out_dir / "regimes.csv"
+    df.to_csv(out_path, index=False)
+    logger.info(f"[regimes] wrote {out_path} ({len(df):,} rows, "
+                f"{df['model'].nunique()} models, "
+                f"{df['regime_kind'].nunique()} regime kinds)")
+
+    # Quick console summary: NBER recession Sharpe vs expansion Sharpe
+    rec_view = (
+        df[df["regime_kind"] == "nber"]
+        .pivot(index="model", columns="regime", values="sharpe_net")
+    )
+    if not rec_view.empty:
+        logger.info("\n=== H-L Sharpe (net) by NBER regime ===")
+        logger.info("\n" + rec_view.round(3).to_string())
+
+    return {"regimes": df}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -575,48 +1063,88 @@ def parse_args():
         help="Path to YAML experiment config (stub: loads via RunSimulation; see configs/experiment.yaml)",
     )
     parser.add_argument(
+        "--variant",
+        choices=["paper", "improved"],
+        default="paper",
+        help=(
+            "Which pipeline to run. "
+            "'paper' = strict GKX (2019) reproduction (1957-2016, TC=0). "
+            "'improved' = extended sample to 2024 + transaction costs modelled "
+            "(macro interactions are on in both). "
+            "Each variant writes to its own outputs/<variant>/ directory and "
+            "uses its own cached feature matrix, so the two pipelines do not "
+            "overwrite each other."
+        ),
+    )
+    parser.add_argument(
         "--mode",
         choices=["full", "test", "cache", "dashboard",
-                 "data-only", "train", "evaluate"],
+                 "data-only", "train", "evaluate", "importance",
+                 "regimes"],
         default="test",
         help=(
             "'full' = WRDS + train + evaluate in one shot; "
             "'data-only' = build feature matrix then stop; "
             "'train' = load cached data, train --models subset, save per-model; "
-            "'evaluate' = merge all per-model .pkl results into final tables; "
+            "'evaluate' = merge per-model .pkl into final tables (incl. ENS-AVG, ENS-MSE); "
+            "'importance' = compute variable importance for trained models; "
+            "'regimes' = regime-conditional evaluation (NBER, VIX, decades); "
             "'test' = synthetic data; 'cache' = reuse feature matrix; "
             "'dashboard' = launch Streamlit"
         ),
     )
     parser.add_argument("--wrds-username", default=os.environ.get("WRDS_USERNAME", ""))
-    parser.add_argument("--train-start", default="1957-03-01")
-    parser.add_argument("--val-start",   default="1975-01-01")
-    parser.add_argument("--val-end",     default="1986-12-31")
-    parser.add_argument("--test-start",  default="1987-01-01")
-    parser.add_argument("--test-end",    default="2016-12-31")
-    parser.add_argument("--tc-bps",      default=10.0, type=float,
-                        help="Transaction cost in bps (one-way)")
+
+    # Date / TC overrides — default None so the variant config wins unless
+    # the user explicitly passes a value on the command line.
+    parser.add_argument("--data-start",  default=None)
+    parser.add_argument("--data-end",    default=None)
+    parser.add_argument("--train-start", default=None)
+    parser.add_argument("--val-start",   default=None)
+    parser.add_argument("--val-end",     default=None)
+    parser.add_argument("--test-start",  default=None)
+    parser.add_argument("--test-end",    default=None)
+    parser.add_argument("--tc-bps",      default=None, type=float,
+                        help="Transaction cost in bps (one-way). Overrides variant default.")
+    parser.add_argument("--refit-step-years", default=None, type=int,
+                        help="Refit each model every N years (default 1 = paper-faithful annual). "
+                             "Set to 2 for ~2x NN speedup with minimal R² loss during development. "
+                             "Checkpoint filename includes this value, so different cadences don't "
+                             "load each other's state.")
+
     parser.add_argument("--models", nargs="+", default=None,
                         help="Subset of models to run (e.g. OLS-3 ENet+H RF NN3)")
     parser.add_argument("--force-retrain", action="store_true",
                         help="Retrain models even if their pickles already exist in "
-                             "outputs/models/. By default, models with existing "
-                             "pickles are skipped.")
+                             "outputs/<variant>/models/. By default, models with "
+                             "existing pickles are skipped.")
     parser.add_argument("--data-step",
                         choices=["all", "fetch", "merge", "chars", "features"],
                         default="all",
                         help="Which data sub-step to run in data-only mode: "
-                             "'all' = run 1→4; 'fetch' = WRDS download; "
+                             "'all' = run 1->4; 'fetch' = WRDS download; "
                              "'merge' = CRSP+Compustat merge; "
                              "'chars' = build characteristics; "
                              "'features' = Kronecker feature matrix")
     parser.add_argument(
         "--checkpoint-dir",
-        default="data/cache/backtest_checkpoint",
-        help="Directory for per-year backtest checkpoints. Lives inside "
-             "data/cache/ by default so the existing cache backup cycle "
-             "covers it.",
+        default=None,
+        help="Override directory for per-year backtest checkpoints. "
+             "Defaults to data/cache/backtest_checkpoint_<variant>/.",
     )
+    parser.add_argument("--no-ensembles", action="store_true",
+                        help="Skip ENS-AVG and ENS-MSE forecast combinations in --mode evaluate.")
+    parser.add_argument("--vix-csv", default=None,
+                        help="Optional path to a CSV with monthly VIX (cols: date, vix). "
+                             "If absent, the embedded offline VIX series is used.")
+    parser.add_argument("--importance-method",
+                        choices=["zero", "permutation"],
+                        default="zero",
+                        help="Variable importance method (only used in --mode importance).")
+    parser.add_argument("--importance-fit-end",
+                        default=None,
+                        help="End date of the train+val window used to fit models for "
+                             "variable importance (default: variant's val_end).")
     return parser.parse_args()
 
 
@@ -644,6 +1172,10 @@ def main():
         results = run_train(args)
     elif args.mode == "evaluate":
         results = run_evaluate(args)
+    elif args.mode == "importance":
+        results = run_importance(args)
+    elif args.mode == "regimes":
+        results = run_regimes(args)
     elif args.mode == "dashboard":
         import subprocess, sys
         subprocess.run([sys.executable, "-m", "streamlit", "run",

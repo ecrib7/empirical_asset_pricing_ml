@@ -129,6 +129,39 @@ def dm_table(
     return pd.DataFrame(mat, index=models, columns=models)
 
 
+def dm_table_full(
+    y_true: np.ndarray,
+    predictions: Dict[str, np.ndarray],
+    dates: np.ndarray,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Compute the DM statistic matrix and the matching p-value matrix.
+
+    Returns
+    -------
+    stat_df : DM statistics, rows = model 1, cols = model 2.
+    pval_df : two-sided p-values from the standard normal.
+
+    The stat matrix uses the same "positive ⇒ column model better than row
+    model" convention as ``dm_table`` (i.e. d_t = e_row² − e_col²).
+    """
+    models = list(predictions.keys())
+    n = len(models)
+    s = np.full((n, n), np.nan)
+    p = np.full((n, n), np.nan)
+    for i, m1 in enumerate(models):
+        for j, m2 in enumerate(models):
+            if i == j:
+                continue
+            dm, pv = diebold_mariano(y_true, predictions[m1], predictions[m2], dates)
+            s[i, j] = dm
+            p[i, j] = pv
+    return (
+        pd.DataFrame(s, index=models, columns=models),
+        pd.DataFrame(p, index=models, columns=models),
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Sharpe ratio metrics
 # ─────────────────────────────────────────────────────────────────────────────
@@ -317,3 +350,68 @@ class ModelEvaluator:
         if not sr.empty:
             df = df.join(sr, how="left")
         return df
+
+    # ─────────────────────────────────────────────────────────────────────
+    #  Comprehensive performance table — net/gross Sharpe, SR*, MaxDD,
+    #  skew, kurtosis, OOS R², alpha (vs equal-weighted market)
+    # ─────────────────────────────────────────────────────────────────────
+    def comprehensive_table(
+        self,
+        portfolio_returns_gross: Optional[Dict[str, Dict[str, pd.Series]]] = None,
+        portfolio_turnover: Optional[Dict[str, Dict[str, pd.Series]]] = None,
+        market_factor: Optional[pd.Series] = None,
+        annualise: int = 12,
+    ) -> pd.DataFrame:
+        """
+        Build the dashboard-style table:
+            Sharpe (net), Sharpe (gross), SR*, Max DD, Skew, Kurt, OOS R²,
+            Mean Turnover, Alpha (% / yr, vs market), t(alpha)
+
+        ``market_factor`` should be a pandas Series of monthly market excess
+        returns indexed by the same dates as the H-L series. If None, a
+        simple equal-weighted average of all decile-1 to decile-10 returns
+        of the first available model is used as a stand-in market factor.
+        """
+        rows = []
+        for model in self.preds.keys():
+            r2 = oos_r2(self.y_true, self.preds[model]) * 100
+            net_hl = self.port_rets.get(model, {}).get("H-L", pd.Series(dtype=float)).dropna()
+            gross_hl = (
+                portfolio_returns_gross.get(model, {}).get("H-L", pd.Series(dtype=float)).dropna()
+                if portfolio_returns_gross else pd.Series(dtype=float)
+            )
+            turn_hl = (
+                portfolio_turnover.get(model, {}).get("H-L", pd.Series(dtype=float)).dropna()
+                if portfolio_turnover else pd.Series(dtype=float)
+            )
+
+            sr_net   = sharpe_ratio(net_hl, annualise) if len(net_hl) > 0 else np.nan
+            sr_gross = sharpe_ratio(gross_hl, annualise) if len(gross_hl) > 0 else np.nan
+            sr_imp   = sr_star(sr_net if not np.isnan(sr_net) else 0.0, r2 / 100.0)
+
+            if len(net_hl) > 0:
+                mdd  = max_drawdown(net_hl) * 100
+                skw  = float(stats.skew(net_hl))
+                kurt = float(stats.kurtosis(net_hl))
+            else:
+                mdd = skw = kurt = np.nan
+
+            if market_factor is not None and len(net_hl) > 0:
+                a, t = alpha_tstat(net_hl, market_factor.to_frame("MKT"))
+            else:
+                a, t = (np.nan, np.nan)
+
+            rows.append({
+                "Model":           model,
+                "Sharpe (net)":    sr_net,
+                "Sharpe (gross)":  sr_gross,
+                "SR*":             sr_imp,
+                "Max DD (%)":      mdd,
+                "Skew":            skw,
+                "Kurt":            kurt,
+                "OOS R² (%)":      r2,
+                "Mean TO (1-way)": float(turn_hl.mean()) if len(turn_hl) > 0 else np.nan,
+                "Alpha (% / yr)":  a,
+                "t(alpha)":        t,
+            })
+        return pd.DataFrame(rows).set_index("Model")

@@ -1,7 +1,69 @@
 # GKX (2019) — Empirical Asset Pricing via Machine Learning
 ### IEOR 4733: Algorithmic Trading — Course Project
 
-This repository implements a **reproduction and extension** of **Gu, Kelly & Xiu (2019)** (*Empirical Asset Pricing via Machine Learning*, RFS): monthly panels, machine-learning return forecasts, recursive out-of-sample evaluation, long–short decile portfolios, and economic significance metrics. It also includes **stub modules** for a modular trading-system layout (YAML-driven experiments, walk-forward engine scaffold, and split `models` / `portfolio` packages) alongside the original GKX pipeline.
+This repository implements a **reproduction and extension** of **Gu, Kelly & Xiu (2019)** (*Empirical Asset Pricing via Machine Learning*, RFS): monthly panels, machine-learning return forecasts, recursive out-of-sample evaluation, long–short decile portfolios, and economic significance metrics.
+
+## Two pipelines, one CLI flag
+
+| Variant      | Sample period | Macro × char | Industry dummies | Transaction costs | Forecast combination | Regime analysis |
+|--------------|---------------|:-:|:-:|---|:-:|:-:|
+| `paper`      | 1957 – 2016   | ✅ | ✅ | **0 bps** (gross, matches paper headline) | ✅ | ✅ |
+| `improved`   | 1957 – 2024   | ✅ | ✅ | **Impact-aware** (FIM-style) | ✅ | ✅ |
+
+Each variant writes to its own `outputs/<variant>/` directory and uses its own cached feature matrix at `data/cache/feature_matrix_<variant>.parquet` — they don't overwrite each other.
+
+## What's in the improved pipeline
+
+**Impact-aware transaction costs** (Frazzini-Israel-Moskowitz 2018-style). Per-stock per-month cost rate:
+```
+cost_bps_i = half_spread_bps(log_mcap_i) + λ × √(trade$ / ADV_i)
+```
+The half-spread is log-linearly interpolated between 25 bps for the smallest-cap decile and 5 bps for the largest, computed against each month's cross-sectional distribution of log market equity. The impact term scales with √(trade dollar / average daily $-volume). ADV is computed as monthly $-volume / 21 (trading days). Implementation: `src/backtest/engine.py::ImpactAwareTransactionCostModel`. The paper variant keeps the legacy flat 0-bps cost.
+
+**Forecast combination.** After per-model training, `--mode evaluate` automatically constructs two ensembles:
+- `ENS-AVG` — equal-weighted average of all per-model predictions
+- `ENS-MSE` — weighted average with weights ∝ 1 / validation MSE (validation slice = earliest 10% of test dates)
+
+Each ensemble is then routed through the same decile portfolio construction and gets its own row in the comprehensive table, DM matrix, and the rest of the metrics. Skip with `--no-ensembles`.
+
+**Regime-conditional evaluation.** `--mode regimes` slices each model's H-L return series by:
+- NBER recession vs expansion (hardcoded recession dates through COVID 2020)
+- VIX terciles (low / mid / high implied vol — embedded offline VIX series, override with `--vix-csv`)
+- Calendar decade
+
+Outputs `regimes.csv` per variant. Reveals which strategies post similar Sharpes across regimes (more likely true alpha) vs which collapse in recessions (cyclical exposure).
+
+## Other v3 features
+
+- **Comprehensive metrics table** — Sharpe (net), Sharpe (gross), SR\* (Campbell-Thompson), Max DD, Skew, Kurtosis, OOS R², Mean Turnover, Alpha, t(α). One row per model + ensemble. Saved as `outputs/<variant>/comprehensive.csv`.
+- **DM with p-values** — `dm_table.csv` (statistic) **and** `dm_pvalues.csv` (two-sided).
+- **Variable importance** — `--mode importance` fits each model on train+val, computes GKX-style zero-set importance, aggregates 920 Kronecker features back to 94 base characteristics. `outputs/<variant>/var_importance.csv`.
+- **Streamlit dashboard** — variant selector, comprehensive metrics, DM heatmaps (stat + p-value), portfolio returns, transaction-cost sensitivity, **Forecast Combination** tab, **Regimes** tab, variable importance, paper-vs-improved comparison.
+
+## Quick start
+
+```bash
+# Reproduce the paper (1957-2016, no TC)
+python main.py --mode data-only --variant paper --wrds-username YOUR_USER
+python main.py --mode train     --variant paper --models OLS-3 ENet+H PCR PLS GLM+H
+python main.py --mode train     --variant paper --models RF GBRT+H
+python main.py --mode train     --variant paper --models NN1 NN2 NN3 NN4 NN5
+python main.py --mode evaluate  --variant paper        # builds ENS-AVG, ENS-MSE
+python main.py --mode regimes   --variant paper        # NBER, VIX, decades
+python main.py --mode importance --variant paper --models OLS-3 ENet+H PCR PLS GBRT+H
+
+# Improved pipeline (1957-2024, impact-aware TC)
+python main.py --mode data-only  --variant improved --wrds-username YOUR_USER
+python main.py --mode train      --variant improved --models OLS-3 ENet+H PCR PLS GBRT+H RF NN1 NN2 NN3 NN4 NN5
+python main.py --mode evaluate   --variant improved
+python main.py --mode regimes    --variant improved
+python main.py --mode importance --variant improved --models OLS-3 ENet+H PCR PLS GBRT+H
+
+# Launch the dashboard (variant selector in sidebar)
+streamlit run src/dashboard/app.py
+```
+
+The Colab notebook `notebooks/empirical_asset_pricing_ml.ipynb` drives the same flow with cells for runtime restarts and Drive backups.
 
 ---
 

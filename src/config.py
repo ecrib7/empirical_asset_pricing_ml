@@ -31,6 +31,60 @@ TEST_END      = "2016-12-31"   # 30-yr out-of-sample test
 
 
 # ─────────────────────────────────────────
+#  Two-pipeline configuration
+#  ----------------------------------------
+#  "paper"    : strict GKX (2019) reproduction
+#  "improved" : extended sample, macro × char interactions ON,
+#               industry dummies ON, transaction costs modelled
+# ─────────────────────────────────────────
+VARIANT_DEFAULTS = {
+    "paper": {
+        "data_start":   "1957-01-01",
+        "data_end":     "2016-12-31",
+        "train_start":  "1957-03-01",
+        "val_start":    "1975-01-01",
+        "val_end":      "1986-12-31",
+        "test_start":   "1987-01-01",
+        "test_end":     "2016-12-31",
+        "use_macro_interactions": True,   # GKX uses 920 = 94 × (1+8) + 74 dummies
+        "use_industry_dummies":   True,
+        "tc_bps":                 0.0,    # paper headline numbers are gross
+        "tc_model":               "flat",
+        "output_dir":             "outputs/paper",
+        "model_dir":              "outputs/paper/models",
+        "feature_cache":          "data/cache/feature_matrix_paper.parquet",
+        "checkpoint_subdir":      "backtest_checkpoint_paper",
+    },
+    "improved": {
+        "data_start":   "1957-01-01",
+        "data_end":     "2024-12-31",     # extends paper sample by ~8 years
+        "train_start":  "1957-03-01",
+        "val_start":    "1975-01-01",
+        "val_end":      "1986-12-31",
+        "test_start":   "1987-01-01",
+        "test_end":     "2024-12-31",
+        "use_macro_interactions": True,
+        "use_industry_dummies":   True,
+        "tc_bps":                 10.0,   # fallback for stocks with missing metadata
+        "tc_model":               "impact",  # FIM-style cap-aware + √(trade$/ADV)
+        "output_dir":             "outputs/improved",
+        "model_dir":              "outputs/improved/models",
+        "feature_cache":          "data/cache/feature_matrix_improved.parquet",
+        "checkpoint_subdir":      "backtest_checkpoint_improved",
+    },
+}
+
+
+def get_variant_config(name: str) -> dict:
+    """Return a dict of defaults for the named variant ('paper' or 'improved')."""
+    if name not in VARIANT_DEFAULTS:
+        raise ValueError(
+            f"Unknown variant {name!r}. Use one of: {list(VARIANT_DEFAULTS)}"
+        )
+    return dict(VARIANT_DEFAULTS[name])
+
+
+# ─────────────────────────────────────────
 #  Macro predictors  (Welch & Goyal 2008)
 # ─────────────────────────────────────────
 MACRO_VARS = ["dp", "ep", "bm", "ntis", "tbl", "tms", "dfy", "svar"]
