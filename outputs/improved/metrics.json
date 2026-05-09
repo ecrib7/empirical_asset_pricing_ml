@@ -1,0 +1,163 @@
+{
+  "OLS-3": {
+    "oos_r2_pct": 0.010544,
+    "hl_sharpe": 0.051573,
+    "hl_sharpe_gross": 0.599389,
+    "hl_mean_turnover_one_way": 1.722198,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENet+H": {
+    "oos_r2_pct": 0.005847,
+    "hl_sharpe": 0.133855,
+    "hl_sharpe_gross": 0.717161,
+    "hl_mean_turnover_one_way": 1.741813,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "PCR": {
+    "oos_r2_pct": 0.017905,
+    "hl_sharpe": 0.262107,
+    "hl_sharpe_gross": 0.748665,
+    "hl_mean_turnover_one_way": 1.655659,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "PLS": {
+    "oos_r2_pct": 0.013793,
+    "hl_sharpe": 0.277388,
+    "hl_sharpe_gross": 0.853246,
+    "hl_mean_turnover_one_way": 1.654093,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "GLM+H": {
+    "oos_r2_pct": 0.007468,
+    "hl_sharpe": 0.005232,
+    "hl_sharpe_gross": 0.574902,
+    "hl_mean_turnover_one_way": 1.707665,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "GBRT+H": {
+    "oos_r2_pct": 0.033492,
+    "hl_sharpe": 0.712381,
+    "hl_sharpe_gross": 1.23678,
+    "hl_mean_turnover_one_way": 1.613324,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN1": {
+    "oos_r2_pct": 0.022167,
+    "hl_sharpe": 0.581157,
+    "hl_sharpe_gross": 1.117476,
+    "hl_mean_turnover_one_way": 1.625082,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN2": {
+    "oos_r2_pct": 0.027341,
+    "hl_sharpe": 0.725968,
+    "hl_sharpe_gross": 1.237238,
+    "hl_mean_turnover_one_way": 1.580522,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN3": {
+    "oos_r2_pct": 0.031143,
+    "hl_sharpe": 0.660195,
+    "hl_sharpe_gross": 1.17441,
+    "hl_mean_turnover_one_way": 1.570907,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN4": {
+    "oos_r2_pct": 0.021082,
+    "hl_sharpe": 0.399441,
+    "hl_sharpe_gross": 0.899504,
+    "hl_mean_turnover_one_way": 1.582033,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENS-AVG": {
+    "oos_r2_pct": 0.063401,
+    "hl_sharpe": 1.372126,
+    "hl_sharpe_gross": 1.715928,
+    "hl_mean_turnover_one_way": 1.066484,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true,
+    "is_ensemble": true
+  },
+  "ENS-MSE": {
+    "oos_r2_pct": 0.063401,
+    "hl_sharpe": 1.37153,
+    "hl_sharpe_gross": 1.715348,
+    "hl_mean_turnover_one_way": 1.066511,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true,
+    "is_ensemble": true
+  },
+  "_reporting": {
+    "variant": "improved",
+    "tc_bps": 10.0,
+    "tc_model": "stock_level",
+    "tc_kwargs": {
+      "vol_spread_bps": 8.0,
+      "vol_impact_scale": 0.4,
+      "nav_billions": 1.0
+    },
+    "data_start": "1957-01-01",
+    "data_end": "2024-12-31",
+    "test_start": "1987-01-01",
+    "test_end": "2024-12-31",
+    "use_macro_interactions": true,
+    "use_industry_dummies": true,
+    "portfolio_pickle_format": "bundle_v1",
+    "primary_hl_series": "net_of_engine_transaction_costs",
+    "hl_engine_tc_bps_default": 10.0,
+    "hl_returns_are_net_of_engine_tc": true
+  },
+  "_ensembles": {
+    "ENS-AVG": {
+      "constituents": [
+        "OLS-3",
+        "ENet+H",
+        "PCR",
+        "PLS",
+        "GLM+H",
+        "GBRT+H",
+        "NN1",
+        "NN2",
+        "NN3",
+        "NN4"
+      ]
+    },
+    "ENS-MSE": {
+      "constituents": [
+        "OLS-3",
+        "ENet+H",
+        "PCR",
+        "PLS",
+        "GLM+H",
+        "GBRT+H",
+        "NN1",
+        "NN2",
+        "NN3",
+        "NN4"
+      ],
+      "weights": {
+        "OLS-3": 0.0999980174876201,
+        "ENet+H": 0.09999964358440025,
+        "PCR": 0.10000740166076637,
+        "PLS": 0.09998967082409949,
+        "GLM+H": 0.09998795594875733,
+        "GBRT+H": 0.10000817349871088,
+        "NN1": 0.10000462157880438,
+        "NN2": 0.10000673798726299,
+        "NN3": 0.09999873443287037,
+        "NN4": 0.09999904299670788
+      },
+      "val_frac": 0.1
+    }
+  }
+}

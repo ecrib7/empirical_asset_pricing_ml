@@ -66,7 +66,10 @@ VARIANT_DEFAULTS = {
         "use_macro_interactions": True,
         "use_industry_dummies":   True,
         "tc_bps":                 10.0,   # fallback for stocks with missing metadata
-        "tc_model":               "impact",  # FIM-style cap-aware + √(trade$/ADV)
+        "tc_model":               "stock_level",  # FIM + per-stock vol scaling
+        "tc_vol_spread_bps":      8.0,    # +bps half-spread per +1 σ_ret z-score
+        "tc_vol_impact_scale":    0.4,    # impact multiplier slope on vol
+        "tc_nav_billions":        1.0,    # strategy AUM ($B) — scales sqrt-impact
         "output_dir":             "outputs/improved",
         "model_dir":              "outputs/improved/models",
         "feature_cache":          "data/cache/feature_matrix_improved.parquet",

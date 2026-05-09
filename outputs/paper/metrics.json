@@ -1,0 +1,159 @@
+{
+  "OLS-3": {
+    "oos_r2_pct": 0.023764,
+    "hl_sharpe": 1.088915,
+    "hl_sharpe_gross": 1.088915,
+    "hl_mean_turnover_one_way": 1.719394,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false
+  },
+  "ENet+H": {
+    "oos_r2_pct": 0.014555,
+    "hl_sharpe": 0.894855,
+    "hl_sharpe_gross": 0.894855,
+    "hl_mean_turnover_one_way": 1.745474,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false
+  },
+  "PCR": {
+    "oos_r2_pct": 0.024718,
+    "hl_sharpe": 1.309952,
+    "hl_sharpe_gross": 1.309952,
+    "hl_mean_turnover_one_way": 1.652472,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false
+  },
+  "PLS": {
+    "oos_r2_pct": 0.03823,
+    "hl_sharpe": 1.374984,
+    "hl_sharpe_gross": 1.374984,
+    "hl_mean_turnover_one_way": 1.651114,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false
+  },
+  "GLM+H": {
+    "oos_r2_pct": 0.015742,
+    "hl_sharpe": 0.935225,
+    "hl_sharpe_gross": 0.935225,
+    "hl_mean_turnover_one_way": 1.708983,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false
+  },
+  "GBRT+H": {
+    "oos_r2_pct": 0.048935,
+    "hl_sharpe": 1.521147,
+    "hl_sharpe_gross": 1.521147,
+    "hl_mean_turnover_one_way": 1.603621,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false
+  },
+  "NN1": {
+    "oos_r2_pct": 0.031662,
+    "hl_sharpe": 1.313053,
+    "hl_sharpe_gross": 1.313053,
+    "hl_mean_turnover_one_way": 1.618315,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false
+  },
+  "NN2": {
+    "oos_r2_pct": 0.027508,
+    "hl_sharpe": 1.317779,
+    "hl_sharpe_gross": 1.317779,
+    "hl_mean_turnover_one_way": 1.582033,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false
+  },
+  "NN3": {
+    "oos_r2_pct": 0.038075,
+    "hl_sharpe": 1.440331,
+    "hl_sharpe_gross": 1.440331,
+    "hl_mean_turnover_one_way": 1.570404,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false
+  },
+  "NN4": {
+    "oos_r2_pct": 0.048012,
+    "hl_sharpe": 1.703095,
+    "hl_sharpe_gross": 1.703095,
+    "hl_mean_turnover_one_way": 1.575244,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false
+  },
+  "ENS-AVG": {
+    "oos_r2_pct": 0.103259,
+    "hl_sharpe": 2.413731,
+    "hl_sharpe_gross": 2.413731,
+    "hl_mean_turnover_one_way": 1.04906,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false,
+    "is_ensemble": true
+  },
+  "ENS-MSE": {
+    "oos_r2_pct": 0.103259,
+    "hl_sharpe": 2.413731,
+    "hl_sharpe_gross": 2.413731,
+    "hl_mean_turnover_one_way": 1.04906,
+    "hl_engine_tc_bps": 0.0,
+    "hl_returns_are_net_of_tc": false,
+    "is_ensemble": true
+  },
+  "_reporting": {
+    "variant": "paper",
+    "tc_bps": 0.0,
+    "tc_model": "flat",
+    "tc_kwargs": null,
+    "data_start": "1957-01-01",
+    "data_end": "2016-12-31",
+    "test_start": "1987-01-01",
+    "test_end": "2016-12-31",
+    "use_macro_interactions": true,
+    "use_industry_dummies": true,
+    "portfolio_pickle_format": "bundle_v1",
+    "primary_hl_series": "net_of_engine_transaction_costs",
+    "hl_engine_tc_bps_default": 0.0,
+    "hl_returns_are_net_of_engine_tc": false
+  },
+  "_ensembles": {
+    "ENS-AVG": {
+      "constituents": [
+        "OLS-3",
+        "ENet+H",
+        "PCR",
+        "PLS",
+        "GLM+H",
+        "GBRT+H",
+        "NN1",
+        "NN2",
+        "NN3",
+        "NN4"
+      ]
+    },
+    "ENS-MSE": {
+      "constituents": [
+        "OLS-3",
+        "ENet+H",
+        "PCR",
+        "PLS",
+        "GLM+H",
+        "GBRT+H",
+        "NN1",
+        "NN2",
+        "NN3",
+        "NN4"
+      ],
+      "weights": {
+        "OLS-3": 0.1000063741361247,
+        "ENet+H": 0.09998103890458904,
+        "PCR": 0.09999586776827857,
+        "PLS": 0.09999422946807858,
+        "GLM+H": 0.10001056654393962,
+        "GBRT+H": 0.10000358016006607,
+        "NN1": 0.0999956993403019,
+        "NN2": 0.10000431320049048,
+        "NN3": 0.10000713213087828,
+        "NN4": 0.10000119834725273
+      },
+      "val_frac": 0.1
+    }
+  }
+}

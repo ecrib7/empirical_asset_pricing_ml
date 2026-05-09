@@ -367,6 +367,7 @@ def _build_portfolios_for_predictions(
     from src.backtest.engine import (
         DecilePortfolioBuilder, TransactionCostModel,
         ImpactAwareTransactionCostModel,
+        StockLevelImpactCostModel,
     )
     from src.evaluation.metrics import oos_r2, sharpe_ratio
 
@@ -384,7 +385,14 @@ def _build_portfolios_for_predictions(
     )
 
     # Build TC model identical to the one engine.run used
-    if cfg.get("tc_model") == "impact":
+    if cfg.get("tc_model") == "stock_level":
+        tc_model = StockLevelImpactCostModel(
+            vol_spread_bps    = float(cfg.get("tc_vol_spread_bps",   8.0)),
+            vol_impact_scale  = float(cfg.get("tc_vol_impact_scale", 0.4)),
+            nav_billions      = float(cfg.get("tc_nav_billions",     1.0)),
+            fallback_bps      = float(cfg.get("tc_bps", 10.0)),
+        )
+    elif cfg.get("tc_model") in ("impact", "stock_level"):
         tc_model = ImpactAwareTransactionCostModel()
     else:
         tc_model = TransactionCostModel(cost_bps=float(cfg["tc_bps"]))
@@ -427,7 +435,7 @@ def _build_portfolios_for_predictions(
                 "hl_sharpe_gross": round(sr_g, 3) if sr_g == sr_g else float("nan"),
                 "hl_mean_turnover_one_way": round(to_m, 6) if to_m == to_m else float("nan"),
                 "hl_engine_tc_bps": cfg["tc_bps"],
-                "hl_returns_are_net_of_tc": cfg["tc_bps"] > 0 or cfg.get("tc_model") == "impact",
+                "hl_returns_are_net_of_tc": cfg["tc_bps"] > 0 or cfg.get("tc_model") in ("impact", "stock_level"),
                 "is_ensemble": True,
             },
         }
@@ -559,7 +567,7 @@ def run_evaluate(args) -> dict:
         "portfolio_pickle_format": "bundle_v1",
         "primary_hl_series": "net_of_engine_transaction_costs",
         "hl_engine_tc_bps_default": cfg["tc_bps"],
-        "hl_returns_are_net_of_engine_tc": cfg["tc_bps"] > 0 or cfg.get("tc_model") == "impact",
+        "hl_returns_are_net_of_engine_tc": cfg["tc_bps"] > 0 or cfg.get("tc_model") in ("impact", "stock_level"),
     }
     metrics_out = dict(metrics)
     metrics_out["_reporting"] = reporting_meta
@@ -817,7 +825,7 @@ def _run_backtest(
         "portfolio_pickle_format": "bundle_v1",
         "primary_hl_series": "net_of_engine_transaction_costs",
         "hl_engine_tc_bps_default": cfg["tc_bps"],
-        "hl_returns_are_net_of_engine_tc": cfg["tc_bps"] > 0 or cfg.get("tc_model") == "impact",
+        "hl_returns_are_net_of_engine_tc": cfg["tc_bps"] > 0 or cfg.get("tc_model") in ("impact", "stock_level"),
     }
     with open(out_dir / "metrics.json", "w") as f:
         json.dump(metrics_out, f, indent=2, default=str)

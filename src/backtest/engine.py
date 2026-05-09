@@ -272,6 +272,125 @@ class ImpactAwareTransactionCostModel:
         return max(self.fallback, (self.hs_small + self.hs_large) / 2 / 10_000)
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Stock-level impact cost model
+#  ----------------------------------------------------------------------------
+#  Extends the FIM-style ``ImpactAwareTransactionCostModel`` with per-stock
+#  return volatility. Empirically, both quoted spreads and impact coefficients
+#  scale with idiosyncratic volatility:
+#
+#    * Stoll (2000) — half-spread is a near-linear function of σ_ret cross-
+#      sectionally (high-vol stocks have wider quotes because dealers face
+#      more inventory risk).
+#    * Hasbrouck (2009) — fitted impact coefficients are ~3× larger for
+#      top-quartile-vol stocks vs bottom-quartile, controlling for size.
+#
+#  The cost-decomposition in this model:
+#
+#     half_spread_bps_i = hs_size_i + γ_spread · max(0, σ_i − σ̄)        [bps]
+#     impact_bps_i      = λ_0 · (1 + γ_impact · σ̃_i) · √(trade$_i / ADV_i)
+#
+#  where σ̃_i = σ_i / σ̄ − 1 is the cross-sectional vol z-score (median = 0)
+#  and σ̄ is the median of σ_i in the current month. γ_spread, γ_impact
+#  default to values that give the top-quartile-vol stock ~50% higher half-
+#  spread and ~40% higher impact than the median stock at equal size/ADV.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StockLevelImpactCostModel(ImpactAwareTransactionCostModel):
+    """
+    Stock-conditional FIM-style impact model. In addition to size and ADV,
+    incorporates per-stock return volatility (``retvol``) into both the
+    half-spread and the market-impact components.
+
+    Parameters
+    ----------
+    half_spread_small_bps, half_spread_large_bps, impact_coef_bps, fallback_bps
+        Forwarded to ``ImpactAwareTransactionCostModel``.
+    vol_spread_bps : float
+        Additional bps of half-spread per (σ_i − σ_median) cross-sectionally.
+        Default 8 bps → top-quartile-vol stock pays ~+8 bps extra spread.
+    vol_impact_scale : float
+        Multiplier on the impact coefficient: ``λ → λ · (1 + scale · σ̃)``
+        where σ̃ is the standardised cross-sectional vol z-score.
+        Default 0.4 → top-quartile-vol stock has ~+40% impact at given trade$.
+    nav_billions : float
+        Strategy NAV in billions, used to convert weights to trade$. Default
+        1.0 ($1B AUM). Larger NAV → larger trade$ → larger √-impact.
+    """
+
+    def __init__(
+        self,
+        half_spread_small_bps: float = 25.0,
+        half_spread_large_bps: float = 5.0,
+        impact_coef_bps: float = 10.0,
+        fallback_bps: float = 10.0,
+        vol_spread_bps: float = 8.0,
+        vol_impact_scale: float = 0.4,
+        nav_billions: float = 1.0,
+    ):
+        super().__init__(
+            half_spread_small_bps=half_spread_small_bps,
+            half_spread_large_bps=half_spread_large_bps,
+            impact_coef_bps=impact_coef_bps,
+            fallback_bps=fallback_bps,
+        )
+        self.vol_spread_bps    = float(vol_spread_bps)
+        self.vol_impact_scale  = float(vol_impact_scale)
+        self.nav               = float(nav_billions) * 1e9
+        self._vol_t: Optional[pd.Series] = None
+        self._vol_median_t: Optional[float] = None
+
+    def set_metadata(
+        self,
+        mcap_t: Optional[pd.Series],
+        adv_t:  Optional[pd.Series],
+        retvol_t: Optional[pd.Series] = None,
+    ) -> None:
+        """Update per-stock context for the current test month."""
+        super().set_metadata(mcap_t, adv_t)
+        self._vol_t = retvol_t
+        if retvol_t is not None and len(retvol_t.dropna()) > 0:
+            v = retvol_t.dropna()
+            v = v[v > 0]
+            self._vol_median_t = float(v.median()) if len(v) > 0 else None
+        else:
+            self._vol_median_t = None
+
+    # ── Overrides ────────────────────────────────────────────────────────
+
+    def _half_spread_bps(self, stocks: pd.Index) -> pd.Series:
+        """Size component (parent) + vol-premium component (this class)."""
+        hs = super()._half_spread_bps(stocks)
+        if self._vol_t is None or self._vol_median_t is None:
+            return hs
+        v = self._vol_t.reindex(stocks)
+        # Add bps of vol-premium for stocks above the median vol; clip at 0.
+        excess = (v - self._vol_median_t).clip(lower=0.0).fillna(0.0)
+        return hs + self.vol_spread_bps * excess / max(self._vol_median_t, 1e-9)
+
+    def _impact_bps(self, stocks: pd.Index, dollar_traded: pd.Series) -> pd.Series:
+        """Vol-scaled FIM impact: λ · (1 + γ · σ̃) · √(trade$ / ADV)."""
+        base_imp = super()._impact_bps(stocks, dollar_traded)
+        if self._vol_t is None or self._vol_median_t is None:
+            return base_imp
+        v = self._vol_t.reindex(stocks)
+        # σ̃ = σ_i / σ_median − 1, centred so median stock has multiplier 1.
+        sigma_tilde = (v / max(self._vol_median_t, 1e-9) - 1.0).fillna(0.0)
+        multiplier = (1.0 + self.vol_impact_scale * sigma_tilde).clip(lower=0.5)
+        return base_imp * multiplier
+
+    def period_turnover_cost(
+        self,
+        w_new: pd.Series,
+        w_old: pd.Series,
+        nav: Optional[float] = None,
+    ) -> float:
+        """Use constructor NAV unless caller overrides explicitly."""
+        nav_used = float(nav) if nav is not None else self.nav
+        return super().period_turnover_cost(w_new, w_old, nav=nav_used)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Decile portfolio builder
 # ─────────────────────────────────────────────────────────────────────────────
@@ -295,6 +414,7 @@ class DecilePortfolioBuilder:
         returns: pd.DataFrame,
         market_caps: Optional[pd.DataFrame] = None,
         adv: Optional[pd.DataFrame] = None,
+        retvol: Optional[pd.DataFrame] = None,
     ) -> Tuple[Dict[str, pd.Series], Dict[str, pd.Series], Dict[str, pd.Series]]:
         dates = predictions.index.intersection(returns.index)
         port_net = {str(d): [] for d in range(1, self.n_deciles + 1)}
@@ -329,7 +449,15 @@ class DecilePortfolioBuilder:
                     else None
                 )
                 adv_t = adv.loc[t] if adv is not None and t in adv.index else None
-                self.tc_model.set_metadata(mc_t, adv_t)
+                # Stock-level models additionally consume per-stock retvol.
+                # The parent ImpactAwareTransactionCostModel.set_metadata()
+                # ignores this kwarg; the child class uses it. Falls back
+                # cleanly when retvol is unavailable.
+                rv_t = retvol.loc[t] if retvol is not None and t in retvol.index else None
+                try:
+                    self.tc_model.set_metadata(mc_t, adv_t, retvol_t=rv_t)
+                except TypeError:
+                    self.tc_model.set_metadata(mc_t, adv_t)
 
             try:
                 labels = pd.qcut(pred_t, q=self.n_deciles,
@@ -607,6 +735,11 @@ class BacktestEngine:
             fm[[date_col, id_col, adv_col]].copy()
             if adv_col in fm.columns else None
         )
+        # retvol used by StockLevelImpactCostModel for vol-conditional spread/impact
+        retvol_lookup = (
+            fm[[date_col, id_col, "retvol"]].copy()
+            if "retvol" in fm.columns else None
+        )
 
         first_train_end = self.test_start - pd.DateOffset(years=1)
         assert first_train_end.year == self.val_end.year, (
@@ -759,7 +892,12 @@ class BacktestEngine:
                                   [adv_col].values)
         else:
             adv_vals = None
-        del me_lookup, adv_lookup, keys_df
+        if retvol_lookup is not None:
+            retvol_vals = (keys_df.merge(retvol_lookup, on=[date_col, id_col], how="left")
+                                     ["retvol"].values)
+        else:
+            retvol_vals = None
+        del me_lookup, adv_lookup, retvol_lookup, keys_df
         gc.collect()
 
         for name, pred_arr in pred_arrays.items():
@@ -780,13 +918,22 @@ class BacktestEngine:
                 if adv_vals is not None else None
             )
 
+            # Pivot retvol the same way as me/adv (date × permno wide frame)
+            retvol_wide = (
+                pd.DataFrame({
+                    "date": pd.to_datetime(test_idx),
+                    "permno": test_permnos,
+                    "retvol": retvol_vals,
+                }).pivot(index="date", columns="permno", values="retvol")
+                if retvol_vals is not None else None
+            )
             builder = DecilePortfolioBuilder(
                 n_deciles=self.n_deciles,
                 weighting=self.weighting,
                 tc_model=self.tc_model,
             )
             net_r, gross_r, turn_r = builder.build(
-                pred_wide, ret_wide, me_wide, adv=adv_wide,
+                pred_wide, ret_wide, me_wide, adv=adv_wide, retvol=retvol_wide,
             )
             portfolio_returns[name] = net_r
             portfolio_returns_gross[name] = gross_r
