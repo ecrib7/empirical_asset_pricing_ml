@@ -18,7 +18,9 @@ from src.data.wrds_loader import (
     CIZ_AWARE_VARIANTS,
     CIZ_COLUMN_MAP,
     WRDSLoader,
+    _attach_siccd_from_history,
     _build_ciz_msf_sql,
+    _build_ciz_siccd_sql,
     _rename_ciz_to_legacy,
     merge_crsp_compustat,
 )
@@ -666,3 +668,276 @@ class TestCIZFetchEndToEnd:
         last_sql = fake.last_payload_sql
         for absent in ("sharetype", "securitytype", "issuertype", "primaryexch"):
             assert absent not in last_sql, f"{absent} predicate emitted unexpectedly"
+
+
+class TestCIZSiccdEnrichment:
+    """When the chosen CIZ monthly table lacks ``siccd``, the loader must
+    join a security-info history table to attach it. Downstream code keys
+    industry signals off ``siccd``."""
+
+    def test_build_ciz_siccd_sql_uses_present_window_columns(self):
+        sql = _build_ciz_siccd_sql(
+            "crsp_q_stock.stksecurityinfohist",
+            cols={"permno", "siccd", "secinfostartdt", "secinfoenddt", "junk"},
+        )
+        assert sql is not None
+        assert "secinfostartdt AS dt_start" in sql
+        assert "secinfoenddt AS dt_end" in sql
+        assert "FROM crsp_q_stock.stksecurityinfohist" in sql
+
+    def test_build_ciz_siccd_sql_falls_back_to_namedt(self):
+        sql = _build_ciz_siccd_sql(
+            "crsp.stocknames_v2",
+            cols={"permno", "siccd", "namedt", "nameenddt"},
+        )
+        assert sql is not None
+        assert "namedt AS dt_start" in sql
+        assert "nameenddt AS dt_end" in sql
+
+    def test_build_ciz_siccd_sql_returns_none_without_siccd(self):
+        sql = _build_ciz_siccd_sql(
+            "crsp.stksecurityinfohdr",
+            cols={"permno", "namedt", "nameenddt"},  # no siccd
+        )
+        assert sql is None
+
+    def test_attach_siccd_from_history_uses_window(self):
+        panel = pd.DataFrame(
+            {
+                "permno": [1, 1, 2],
+                "date": pd.to_datetime(["2026-01-31", "2026-04-30", "2026-01-31"]),
+                "ret": [0.01, 0.02, -0.01],
+            }
+        )
+        hist = pd.DataFrame(
+            {
+                "permno": [1, 1, 2],
+                "siccd": ["3711", "3714", "7372"],
+                "dt_start": pd.to_datetime(["1990-01-01", "2026-03-01", "1990-01-01"]),
+                "dt_end": pd.to_datetime(["2026-02-28", "2099-12-31", "2099-12-31"]),
+            }
+        )
+        out = _attach_siccd_from_history(panel, hist)
+        assert "siccd" in out.columns
+        # permno 1 in Jan-26 → first window; in Apr-26 → second window
+        assert out.loc[0, "siccd"] == "3711"
+        assert out.loc[1, "siccd"] == "3714"
+        assert out.loc[2, "siccd"] == "7372"
+
+    def test_attach_siccd_from_history_handles_open_ended_window(self):
+        panel = pd.DataFrame(
+            {"permno": [42], "date": pd.to_datetime(["2026-05-31"])}
+        )
+        hist = pd.DataFrame(
+            {
+                "permno": [42],
+                "siccd": ["6020"],
+                "dt_start": [pd.NaT],
+                "dt_end": [pd.NaT],
+            }
+        )
+        out = _attach_siccd_from_history(panel, hist)
+        assert out.loc[0, "siccd"] == "6020"
+
+    def test_attach_siccd_preserves_existing_when_present(self):
+        panel = pd.DataFrame(
+            {
+                "permno": [1, 2],
+                "date": pd.to_datetime(["2026-01-31", "2026-01-31"]),
+                "siccd": ["3711", None],
+            }
+        )
+        hist = pd.DataFrame(
+            {
+                "permno": [1, 2],
+                "siccd": ["9999", "7372"],  # would overwrite 1's existing if buggy
+                "dt_start": pd.to_datetime(["1990-01-01", "1990-01-01"]),
+                "dt_end": pd.to_datetime(["2099-12-31", "2099-12-31"]),
+            }
+        )
+        out = _attach_siccd_from_history(panel, hist)
+        # Existing siccd preserved for permno 1; permno 2 backfilled.
+        assert out.loc[0, "siccd"] == "3711"
+        assert out.loc[1, "siccd"] == "7372"
+
+    def test_fetch_ciz_enriches_siccd_via_security_info_hist(self, tmp_path):
+        """End-to-end: stkmthsecuritydata exposes no siccd → loader joins
+        stksecurityinfohist and the returned panel carries siccd."""
+        # CIZ monthly rows without siccd
+        rows = pd.DataFrame(
+            {
+                "permno": [10, 10],
+                "mthcaldt": pd.to_datetime(["2026-01-31", "2026-02-28"]),
+                "mthret": [0.01, -0.02],
+                "mthprc": [50.0, 49.0],
+                "mthcap": [500_000.0, 490_000.0],
+            }
+        )
+        # History table with a single window covering both months
+        sec_hist = pd.DataFrame(
+            {
+                "permno": [10],
+                "siccd": ["3711"],
+                "dt_start": pd.to_datetime(["1990-01-01"]),
+                "dt_end": pd.to_datetime(["2099-12-31"]),
+            }
+        )
+        fake = _FakeWRDSConn(
+            {
+                "crsp_q_stock.stkmthsecuritydata": {
+                    "columns": set(rows.columns),
+                    "rows": rows,
+                },
+                "crsp_q_stock.stksecurityinfohist": {
+                    "columns": {"permno", "siccd", "secinfostartdt", "secinfoenddt"},
+                    "rows": sec_hist.rename(
+                        columns={
+                            "dt_start": "dt_start",
+                            "dt_end": "dt_end",
+                        }
+                    ),
+                },
+            }
+        )
+        loader = WRDSLoader(
+            wrds_username="",
+            cache_dir=str(tmp_path) + "/",
+            start_date="2026-01-01",
+            end_date="2026-03-31",
+            data_source="ciz",
+        )
+        loader._db = fake
+        loader._connect = lambda: loader._db  # type: ignore[method-assign]
+        df = loader._fetch_crsp_monthly_ciz()
+        assert "siccd" in df.columns
+        assert (df["siccd"] == "3711").all()
+
+
+class TestMergeBackfillsSiccdFromSich:
+    def test_merge_backfills_siccd_from_compustat_sich(self):
+        link = pd.DataFrame(
+            {
+                "gvkey": ["G1"],
+                "permno": [1],
+                "linkdt": pd.to_datetime(["1990-01-01"]),
+                "linkenddt": pd.to_datetime(["2099-12-31"]),
+            }
+        )
+        comp = pd.DataFrame(
+            {
+                "gvkey": ["G1"],
+                "datadate": pd.to_datetime(["2025-06-30"]),
+                "at": [1000.0],
+                "sich": [3711.0],
+            }
+        )
+        # CRSP side has NO siccd at all (real-world CIZ stkmth case)
+        crsp = pd.DataFrame(
+            {
+                "permno": [1, 1],
+                "date": pd.to_datetime(["2026-01-31", "2026-02-28"]),
+                "ret": [0.01, 0.02],
+            }
+        )
+        merged = merge_crsp_compustat(crsp, comp, link, lag_months=6)
+        assert "siccd" in merged.columns
+        assert merged["siccd"].notna().all()
+        assert (merged["siccd"] == 3711.0).all()
+
+    def test_merge_preserves_existing_siccd_when_present(self):
+        link = pd.DataFrame(
+            {
+                "gvkey": ["G1"],
+                "permno": [1],
+                "linkdt": pd.to_datetime(["1990-01-01"]),
+                "linkenddt": pd.to_datetime(["2099-12-31"]),
+            }
+        )
+        comp = pd.DataFrame(
+            {
+                "gvkey": ["G1"],
+                "datadate": pd.to_datetime(["2025-06-30"]),
+                "at": [1000.0],
+                "sich": [9999.0],  # Compustat code that would overwrite if buggy
+            }
+        )
+        crsp = pd.DataFrame(
+            {
+                "permno": [1],
+                "date": pd.to_datetime(["2026-01-31"]),
+                "ret": [0.01],
+                "siccd": ["3711"],  # CRSP-supplied
+            }
+        )
+        merged = merge_crsp_compustat(crsp, comp, link, lag_months=6)
+        # Existing CRSP siccd not overwritten by Compustat sich.
+        assert merged.loc[0, "siccd"] == "3711"
+
+
+class TestIndmomPanelMissingSiccd:
+    """IndustryBuilder.indmom_panel must not crash when siccd is unavailable."""
+
+    def test_returns_nan_when_siccd_missing_and_no_sich(self):
+        from src.data.characteristics import IndustryBuilder
+
+        panel = pd.DataFrame(
+            {
+                "permno": [1, 1, 2, 2],
+                "date": pd.to_datetime(
+                    ["2026-01-31", "2026-02-28", "2026-01-31", "2026-02-28"]
+                ),
+                "ret": [0.01, 0.02, -0.01, 0.0],
+            }
+        )
+        out = IndustryBuilder.indmom_panel(panel)
+        assert isinstance(out, pd.Series)
+        assert len(out) == len(panel)
+        assert out.isna().all()
+
+    def test_returns_nan_when_siccd_all_nan(self):
+        from src.data.characteristics import IndustryBuilder
+
+        panel = pd.DataFrame(
+            {
+                "permno": [1, 2],
+                "date": pd.to_datetime(["2026-01-31", "2026-01-31"]),
+                "ret": [0.01, -0.01],
+                "siccd": [np.nan, np.nan],
+            }
+        )
+        out = IndustryBuilder.indmom_panel(panel)
+        assert out.isna().all()
+
+    def test_falls_back_to_sich_when_siccd_missing(self):
+        from src.data.characteristics import IndustryBuilder
+
+        # Two stocks in same 2-digit SIC at the same date; with enough
+        # history, indmom should return a non-null number for the cross
+        # section. We just check it does NOT crash and that non-null
+        # entries appear when sich provides the industry code.
+        dates = pd.date_range("2024-01-31", "2026-02-28", freq="ME")
+        permnos = [1, 2]
+        rows = []
+        for p in permnos:
+            for t in dates:
+                rows.append({"permno": p, "date": t, "ret": 0.01, "sich": 3711.0})
+        panel = pd.DataFrame(rows)
+        out = IndustryBuilder.indmom_panel(panel)
+        assert isinstance(out, pd.Series)
+        assert len(out) == len(panel)
+        # At least the most-recent row, with full history, should be finite.
+        assert out.notna().any()
+
+    def test_unchanged_behavior_when_siccd_present(self):
+        from src.data.characteristics import IndustryBuilder
+
+        dates = pd.date_range("2024-01-31", "2026-02-28", freq="ME")
+        rows = []
+        for p in [1, 2]:
+            for t in dates:
+                rows.append(
+                    {"permno": p, "date": t, "ret": 0.01, "siccd": "3711"}
+                )
+        panel = pd.DataFrame(rows)
+        out = IndustryBuilder.indmom_panel(panel)
+        assert out.notna().any()

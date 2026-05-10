@@ -513,12 +513,27 @@ class IndustryBuilder:
         Industry momentum (Moskowitz & Grinblatt 1999):
         equal-weighted average of firm-level 12-month momentum (months t−13 to t−2,
         skipping t−1) among stocks in the same 2-digit SIC industry and month.
+
+        If the panel has no usable industry code (``siccd`` missing or all-NA),
+        we cannot compute industry-level cross-sectional means: returns a NaN
+        series aligned to the panel index rather than crashing the pipeline.
         """
         p = panel.copy()
         p["mom12m_stock"] = p.groupby("permno", sort=False)["ret"].transform(
             lambda s: MomentumBuilder.mom12m(s)
         )
-        p["sic2"] = p["siccd"].astype(str).str[:2]
+        sic_source = None
+        if "siccd" in p.columns and p["siccd"].notna().any():
+            sic_source = p["siccd"]
+        elif "sich" in p.columns and p["sich"].notna().any():
+            sic_source = p["sich"]
+        if sic_source is None:
+            logger.warning(
+                "indmom_panel: panel has no 'siccd' or 'sich' with non-null "
+                "values; emitting NaN industry-momentum column."
+            )
+            return pd.Series(np.nan, index=panel.index, name="indmom")
+        p["sic2"] = sic_source.astype(str).str[:2]
         indmom = p.groupby(["date", "sic2"])["mom12m_stock"].transform("mean")
         return indmom
 

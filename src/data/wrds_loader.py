@@ -121,6 +121,28 @@ _CIZ_SOURCE_PREFERENCE: tuple[str, ...] = (
     "crsp.msf_v2",
 )
 
+# Tables that carry a historical (permno, siccd, namedt, nameendt) view in
+# the CIZ schema. Used to enrich the monthly panel with siccd when the
+# chosen monthly table doesn't expose it directly. Tried in order; the
+# first table whose schema looks usable wins.
+_CIZ_SICCD_SOURCE_PREFERENCE: tuple[str, ...] = (
+    "crsp_q_stock.stksecurityinfohist",
+    "crsp_q_stock.stocknames_v2",
+    "crsp_q_stock.stksecurityinfohdr",
+    "crsp.stksecurityinfohist",
+    "crsp.stocknames_v2",
+    "crsp.stksecurityinfohdr",
+)
+
+# Candidate column names across CIZ siccd-source tables. We accept the
+# first one present.
+_CIZ_SICCD_DATE_START_CANDIDATES: tuple[str, ...] = (
+    "secinfostartdt", "namedt", "secinfodtbeg", "histdt",
+)
+_CIZ_SICCD_DATE_END_CANDIDATES: tuple[str, ...] = (
+    "secinfoenddt", "nameenddt", "secinfodtend",
+)
+
 
 def _rename_ciz_to_legacy(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -164,6 +186,91 @@ def _ciz_table_columns(db, table: str) -> set[str]:
     if df is None or len(df) == 0:
         return set()
     return {str(c).lower() for c in df["column_name"].tolist()}
+
+
+def _pick_first_present(candidates: tuple[str, ...], cols: set[str]) -> Optional[str]:
+    for c in candidates:
+        if c in cols:
+            return c
+    return None
+
+
+def _build_ciz_siccd_sql(table: str, cols: set[str]) -> Optional[str]:
+    """
+    Build a SELECT against a CIZ siccd-source table that returns one row
+    per (permno, validity-window) with columns ``permno, siccd, dt_start,
+    dt_end``. Returns None if the table lacks ``permno`` or ``siccd``.
+
+    Validity-window columns are best-effort: if the table only carries a
+    single ``namedt``/``secinfostartdt`` we still emit it and treat the end
+    as open (NULL ↔ far future at join time). If neither boundary is
+    present (e.g. a header-only table), we project NULLs and fall back to
+    a permno-only join (most-recent siccd per permno).
+    """
+    if "permno" not in cols or "siccd" not in cols:
+        return None
+    start_col = _pick_first_present(_CIZ_SICCD_DATE_START_CANDIDATES, cols)
+    end_col = _pick_first_present(_CIZ_SICCD_DATE_END_CANDIDATES, cols)
+    start_sql = f"{start_col} AS dt_start" if start_col else "NULL::date AS dt_start"
+    end_sql = f"{end_col} AS dt_end" if end_col else "NULL::date AS dt_end"
+    return (
+        f"SELECT permno, siccd, {start_sql}, {end_sql} "
+        f"FROM {table} WHERE siccd IS NOT NULL"
+    )
+
+
+def _attach_siccd_from_history(panel: pd.DataFrame, hist: pd.DataFrame) -> pd.DataFrame:
+    """
+    Attach ``siccd`` to ``panel`` (which already carries ``permno`` and
+    ``date``) using a (permno, namedt..nameenddt) history. Open-ended
+    windows (NaT in dt_end) are treated as +infinity. If neither dt_start
+    nor dt_end is populated for a permno, the most-recent record wins.
+
+    Pure pandas — no WRDS calls — so it is straightforward to unit-test.
+    """
+    if hist is None or hist.empty:
+        return panel
+    if "permno" not in panel.columns or "date" not in panel.columns:
+        return panel
+    h = hist.copy()
+    h["permno"] = pd.to_numeric(h["permno"], errors="coerce").astype("Int64")
+    h = h.dropna(subset=["permno", "siccd"])
+    h["dt_start"] = pd.to_datetime(h.get("dt_start"), errors="coerce")
+    h["dt_end"] = pd.to_datetime(h.get("dt_end"), errors="coerce")
+    h["dt_start"] = h["dt_start"].fillna(pd.Timestamp("1900-01-01"))
+    h["dt_end"] = h["dt_end"].fillna(pd.Timestamp("2099-12-31"))
+
+    p = panel.copy()
+    p["permno"] = pd.to_numeric(p["permno"], errors="coerce").astype("Int64")
+    p["date"] = pd.to_datetime(p["date"])
+    # Drop the panel's siccd before the cross-join to avoid suffix collisions
+    # (panel-side NA must not mask history-side hits). We re-merge the
+    # original siccd back at the end so existing values win over history.
+    p_keys = p[["permno", "date"]].reset_index()
+    merged = p_keys.merge(
+        h[["permno", "siccd", "dt_start", "dt_end"]],
+        on="permno",
+        how="left",
+    )
+    in_window = (
+        (merged["date"] >= merged["dt_start"])
+        & (merged["date"] <= merged["dt_end"])
+    )
+    merged.loc[~in_window, "siccd"] = np.nan
+    # Pick the latest valid siccd per (original index): orders by dt_start
+    # so deterministic when histories overlap.
+    merged = merged.sort_values(["index", "dt_start"])
+    sic = (
+        merged.dropna(subset=["siccd"])
+        .drop_duplicates(subset=["index"], keep="last")
+        .set_index("index")["siccd"]
+    )
+    out = panel.copy()
+    if "siccd" in out.columns:
+        out["siccd"] = out["siccd"].where(out["siccd"].notna(), out.index.map(sic))
+    else:
+        out["siccd"] = out.index.map(sic)
+    return out
 
 
 def _build_ciz_msf_sql(
@@ -470,7 +577,51 @@ class WRDSLoader:
             ).astype("Int64")
         if "sharetype" in msf.columns:
             msf["shrcd"] = np.where(msf["sharetype"] == "NS", 11, np.nan)
+
+        # Enrich with siccd if the chosen monthly CIZ table didn't expose it
+        # (e.g. crsp_q_stock.stkmthsecuritydata carries pricing+cap only and
+        # leaves industry codes to the security-info history tables).
+        needs_siccd = "siccd" not in msf.columns or msf["siccd"].isna().all()
+        if needs_siccd:
+            msf = self._enrich_ciz_siccd(db, msf)
         return msf.reset_index(drop=True)
+
+    def _enrich_ciz_siccd(self, db, msf: pd.DataFrame) -> pd.DataFrame:
+        """
+        Best-effort enrichment of a CIZ monthly panel with ``siccd`` by
+        joining a security-info history table from
+        ``_CIZ_SICCD_SOURCE_PREFERENCE``. Falls through silently with a
+        warning when no candidate is accessible — downstream code is
+        expected to handle missing ``siccd`` gracefully.
+        """
+        for table in _CIZ_SICCD_SOURCE_PREFERENCE:
+            try:
+                cols = _ciz_table_columns(db, table)
+                sql = _build_ciz_siccd_sql(table, cols)
+                if sql is None:
+                    continue
+                logger.info("CIZ loader: enriching siccd from %s", table)
+                hist = db.raw_sql(sql, date_cols=["dt_start", "dt_end"])
+                if hist is None or hist.empty:
+                    continue
+                out = _attach_siccd_from_history(msf, hist)
+                logger.info(
+                    "CIZ loader: siccd populated for %d/%d rows from %s",
+                    int(out["siccd"].notna().sum()) if "siccd" in out.columns else 0,
+                    len(out),
+                    table,
+                )
+                return out
+            except Exception as exc:
+                logger.warning(
+                    "CIZ loader: siccd enrichment via %s failed (%s)",
+                    table, exc,
+                )
+        logger.warning(
+            "CIZ loader: no siccd source available; downstream characteristics "
+            "will fall back to Compustat sich or NaN."
+        )
+        return msf
 
     # ─── Compustat Annual ─────────────────────────────────────────────────
     def get_compustat_annual(self, force_refresh: bool = False) -> pd.DataFrame:
@@ -747,4 +898,16 @@ def merge_crsp_compustat(
             continue
         chunks.append(pd.merge_asof(Lg, Rg, on="date", direction="backward"))
 
-    return pd.concat(chunks, ignore_index=True)
+    out = pd.concat(chunks, ignore_index=True)
+
+    # Backfill siccd from Compustat's sich when the CRSP side did not
+    # supply it (CIZ ``stkmthsecuritydata`` lacks siccd; if loader-level
+    # enrichment also failed, sich is the next-best industry code).
+    if "sich" in out.columns:
+        if "siccd" not in out.columns:
+            out["siccd"] = out["sich"]
+        else:
+            need = out["siccd"].isna()
+            if need.any():
+                out.loc[need, "siccd"] = out.loc[need, "sich"]
+    return out
