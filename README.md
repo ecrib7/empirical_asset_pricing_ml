@@ -205,6 +205,12 @@ python generate_synthetic_results.py --variant future2026_all
 # (Re)generate panel parquets only — skip outputs/
 python generate_synthetic_results.py --variant future2026_all --panels-only
 
+# Validate the parquet panels match their scenario before consuming them
+python scripts/diagnose_synthetic_panels.py \
+    --panel-root data/cache/synthetic_panels \
+    --output outputs/synthetic_panel_diagnostics.csv \
+    --summary-md outputs/synthetic_panel_diagnostics.md
+
 # Build outputs from an existing panel parquet (fail if missing)
 python generate_synthetic_results.py --variant future2026_base --from-panel
 
@@ -255,6 +261,43 @@ noise scale set by a per-model "skill" coefficient). Ensembles and
 deep NNs have a higher skill coefficient (≈0.80) and therefore earn
 wider H-L spreads — exactly the leaderboard pattern observed on real
 data, but produced entirely from synthetic data.
+
+#### Panel diagnostics
+
+Before consuming the generated parquets, validate that each scenario panel
+actually exhibits the dynamics implied by its label. The diagnostics
+script reads parquets only, never WRDS, and writes a CSV (one row per
+scenario) with market moments, drawdown, cross-sectional dispersion,
+rank persistence, momentum/reversal spreads, factor correlations, and
+scenario-specific warnings (e.g. crisis must have a deep negative
+market month and elevated drawdown; choppy must show higher vol than
+base; trending must show positive rank persistence and a positive
+1-month momentum spread; mean_reversion must show non-positive rank
+persistence and a positive reversal spread; rotating_leaders must
+show high month-over-month rank churn; factor_rotation must show
+sign changes in the value/momentum cross-sectional correlation).
+
+```bash
+python generate_synthetic_results.py --variant future2026_all --panels-only
+python scripts/diagnose_synthetic_panels.py \
+    --panel-root data/cache/synthetic_panels \
+    --output outputs/synthetic_panel_diagnostics.csv
+# Optional markdown summary
+python scripts/diagnose_synthetic_panels.py \
+    --panel-root data/cache/synthetic_panels \
+    --output outputs/synthetic_panel_diagnostics.csv \
+    --summary-md outputs/synthetic_panel_diagnostics.md
+# Fail the run (exit 1) if any panel violates its scenario expectations
+python scripts/diagnose_synthetic_panels.py \
+    --panel-root data/cache/synthetic_panels \
+    --output outputs/synthetic_panel_diagnostics.csv --strict
+```
+
+Treat the diagnostic CSV as a precondition. If a panel's warning list
+is non-empty (`--strict` exits non-zero), do not consume the
+downstream `outputs/<variant>/` artifacts — regenerate the panel and
+re-run the diagnostic until it passes. Thresholds are conservative
+and documented at the top of `scripts/diagnose_synthetic_panels.py`.
 
 Caveats:
 
