@@ -153,6 +153,56 @@ Caveats:
 
 ---
 
+### Synthetic future scenarios (post-WRDS, 2026-04 → 2036-03)
+
+`generate_synthetic_results.py` produces fully synthetic backtest
+artifacts that don't touch WRDS and don't train any real model. It's
+used to (a) populate the dashboard when no real data is available and
+(b) stress-test the pipeline's downstream stages under hand-crafted
+regimes inspired by the [anticor-trader](https://github.com/cvxgrp/anticor-trader)
+scenario taxonomy.
+
+Each variant covers exactly 120 month-ends (`2026-04-30 .. 2036-03-31`)
+and writes the standard artifact set into `outputs/<variant>/` so the
+dashboard reads them unchanged. Available scenarios:
+
+| Variant                             | Regime                                          |
+|-------------------------------------|-------------------------------------------------|
+| `future2026_base`                   | Calibrated baseline continuation                |
+| `future2026_trending`               | Persistent leadership / strong momentum         |
+| `future2026_mean_reversion`         | Negative autocorrelation / contrarian winners   |
+| `future2026_rotating_leaders`       | Decile leadership permutes every 12 months      |
+| `future2026_choppy`                 | High noise, low signal                          |
+| `future2026_crisis`                 | Correlated drawdown shock + gradual recovery    |
+| `future2026_factor_rotation`        | Dominant style/factor sign flips every 18 mo    |
+
+```bash
+# Generate one scenario
+python generate_synthetic_results.py --variant future2026_base
+
+# Generate all seven future scenarios in one shot
+python generate_synthetic_results.py --variant future2026_all
+
+# Also re-generate the post-2016 CIZ-window synthetic baseline
+python generate_synthetic_results.py --variant post2016_ciz
+
+# Browse all variants together (dashboard sidebar auto-discovers any
+# outputs/<sub>/ directory with a metrics.json).
+streamlit run src/dashboard/app.py
+```
+
+Caveats:
+
+* No real returns are produced; each variant is a deterministic synthetic
+  draw (seeded by the variant name).
+* Scenarios differ qualitatively (drift / momentum / leadership / vol
+  regime), not just by RNG seed — `future2026_trending` will show
+  persistently positive H-L runs while `future2026_choppy` will not.
+* These outputs are for sanity-checking the dashboard and downstream
+  reporting; they must NOT be interpreted as forecasts.
+
+---
+
 ## Setup
 
 ### 1. Install dependencies
