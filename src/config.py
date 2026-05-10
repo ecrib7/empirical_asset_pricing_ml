@@ -31,6 +31,18 @@ TEST_END      = "2016-12-31"   # 30-yr out-of-sample test
 
 
 # ─────────────────────────────────────────
+#  Real-vs-synthetic data boundary
+#  Verified against WRDS on 2026-05-10. See
+#  scripts/check_wrds_coverage.py and the manifest at
+#  outputs/data_coverage/coverage_latest.json. REAL_DATA_END is
+#  min(crsp.msf.max_date, crsp.msenames.max_nameendt); anything after
+#  it must be flagged as synthetic by downstream code.
+# ─────────────────────────────────────────
+REAL_DATA_END    = "2024-12-31"
+SYNTHETIC_START  = "2025-01-31"   # first month-end strictly after REAL_DATA_END
+
+
+# ─────────────────────────────────────────
 #  Two-pipeline configuration
 #  ----------------------------------------
 #  "paper"    : strict GKX (2019) reproduction
@@ -74,6 +86,40 @@ VARIANT_DEFAULTS = {
         "model_dir":              "outputs/improved/models",
         "feature_cache":          "data/cache/feature_matrix_improved.parquet",
         "checkpoint_subdir":      "backtest_checkpoint_improved",
+    },
+    # ─────────────────────────────────────────────────────────────
+    # extended_2024 — explicit "real-only, post-paper extension"
+    # variant. Same pipeline knobs as 'improved' but the dates are
+    # documented to align with the verified WRDS coverage cutoff
+    # (REAL_DATA_END = 2024-12-31). It carries metadata about the
+    # real/synthetic boundary so downstream code can distinguish
+    # real-data backtests from synthetic stress tests without
+    # mutating the existing 'paper' / 'improved' variants.
+    # ─────────────────────────────────────────────────────────────
+    "extended_2024": {
+        "data_start":   "1957-01-01",
+        "data_end":     "2024-12-31",
+        "train_start":  "1957-03-01",
+        "val_start":    "1975-01-01",
+        "val_end":      "1986-12-31",
+        "test_start":   "2017-01-01",   # post-paper out-of-sample
+        "test_end":     "2024-12-31",
+        "use_macro_interactions": True,
+        "use_industry_dummies":   True,
+        "tc_bps":                 10.0,
+        "tc_model":               "stock_level",
+        "tc_vol_spread_bps":      8.0,
+        "tc_vol_impact_scale":    0.4,
+        "tc_nav_billions":        1.0,
+        "output_dir":             "outputs/extended_2024",
+        "model_dir":              "outputs/extended_2024/models",
+        "feature_cache":          "data/cache/feature_matrix_extended_2024.parquet",
+        "checkpoint_subdir":      "backtest_checkpoint_extended_2024",
+        # Real/synthetic metadata (read by scripts/check_wrds_coverage.py
+        # and src/synthetic/regimes.py — does not affect existing variants).
+        "real_data_end":          REAL_DATA_END,
+        "synthetic_start":        SYNTHETIC_START,
+        "synthetic_enabled":      False,
     },
 }
 
