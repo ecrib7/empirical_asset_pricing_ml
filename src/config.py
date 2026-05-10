@@ -34,12 +34,29 @@ TEST_END      = "2016-12-31"   # 30-yr out-of-sample test
 #  Real-vs-synthetic data boundary
 #  Verified against WRDS on 2026-05-10. See
 #  scripts/check_wrds_coverage.py and the manifest at
-#  outputs/data_coverage/coverage_latest.json. REAL_DATA_END is
-#  min(crsp.msf.max_date, crsp.msenames.max_nameendt); anything after
-#  it must be flagged as synthetic by downstream code.
+#  outputs/data_coverage/coverage_latest.json.
+#
+#  Subscription coverage on 2026-05-10:
+#    * Legacy CRSP monthly stock file (crsp.msf) stops at 2024-12-31.
+#    * CIZ/v2 monthly tables extend further:
+#        - crsp.msf_v2 / crsp.stkmthsecuritydata     -> 2025-12-31
+#        - crsp_q_stock.msf_v2 / .stkmthsecuritydata -> 2026-03-31
+#    * Compustat funda/fundq -> 2026-04-30; CCM linkenddt -> 2026-01-30.
+#
+#  REAL_DATA_END is the most extended real-data endpoint usable by the
+#  CIZ-aware pipeline (2026-03-31 from crsp_q_stock). Anything strictly
+#  after it must be flagged as synthetic by downstream code.
+#
+#  Legacy callers that must remain compatible with the legacy crsp.msf
+#  endpoint should reference ``LEGACY_REAL_DATA_END`` instead. The
+#  ``paper`` variant (1957–2016) is unaffected by either constant; the
+#  ``improved`` variant remains legacy-compatible (data_end = 2024-12-31)
+#  while the new ``extended_ciz_2026`` variant uses the CIZ endpoint.
 # ─────────────────────────────────────────
-REAL_DATA_END    = "2024-12-31"
-SYNTHETIC_START  = "2025-01-31"   # first month-end strictly after REAL_DATA_END
+LEGACY_REAL_DATA_END   = "2024-12-31"   # crsp.msf max(date) on user's WRDS
+LEGACY_SYNTHETIC_START = "2025-01-31"   # first month-end after legacy endpoint
+REAL_DATA_END          = "2026-03-31"   # CIZ-aware: crsp_q_stock max(mthcaldt)
+SYNTHETIC_START        = "2026-04-30"   # first month-end strictly after REAL_DATA_END
 
 
 # ─────────────────────────────────────────
@@ -117,6 +134,42 @@ VARIANT_DEFAULTS = {
         "checkpoint_subdir":      "backtest_checkpoint_extended_2024",
         # Real/synthetic metadata (read by scripts/check_wrds_coverage.py
         # and src/synthetic/regimes.py — does not affect existing variants).
+        # This variant is pinned to the LEGACY crsp.msf endpoint
+        # (2024-12-31) to remain reproducible against the user's legacy
+        # subscription. CIZ-aware extension lives in extended_ciz_2026.
+        "real_data_end":          LEGACY_REAL_DATA_END,
+        "synthetic_start":        LEGACY_SYNTHETIC_START,
+        "synthetic_enabled":      False,
+    },
+    # ─────────────────────────────────────────────────────────────
+    # extended_ciz_2026 — CIZ/v2-aware extension. Same pipeline knobs
+    # as 'extended_2024' but the data_end / test_end follow the
+    # furthest CIZ monthly endpoint observed on the user's WRDS
+    # subscription (crsp_q_stock.* -> 2026-03-31). Use this variant
+    # for CIZ-aware backtests; keep 'extended_2024' for legacy-msf
+    # reproducibility.
+    # ─────────────────────────────────────────────────────────────
+    "extended_ciz_2026": {
+        "data_start":   "1957-01-01",
+        "data_end":     "2026-03-31",
+        "train_start":  "1957-03-01",
+        "val_start":    "1975-01-01",
+        "val_end":      "1986-12-31",
+        "test_start":   "2017-01-01",   # post-paper out-of-sample
+        "test_end":     "2026-03-31",
+        "use_macro_interactions": True,
+        "use_industry_dummies":   True,
+        "tc_bps":                 10.0,
+        "tc_model":               "stock_level",
+        "tc_vol_spread_bps":      8.0,
+        "tc_vol_impact_scale":    0.4,
+        "tc_nav_billions":        1.0,
+        "output_dir":             "outputs/extended_ciz_2026",
+        "model_dir":              "outputs/extended_ciz_2026/models",
+        "feature_cache":          "data/cache/feature_matrix_extended_ciz_2026.parquet",
+        "checkpoint_subdir":      "backtest_checkpoint_extended_ciz_2026",
+        # CIZ-aware boundary: REAL_DATA_END/SYNTHETIC_START are now the
+        # CIZ endpoints (2026-03-31 / 2026-04-30).
         "real_data_end":          REAL_DATA_END,
         "synthetic_start":        SYNTHETIC_START,
         "synthetic_enabled":      False,

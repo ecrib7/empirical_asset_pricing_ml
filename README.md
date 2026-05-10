@@ -5,28 +5,45 @@ This repository implements a **reproduction and extension** of **Gu, Kelly & Xiu
 
 ## Two pipelines, one CLI flag
 
-| Variant         | Sample period | Macro × char | Industry dummies | Transaction costs | Forecast combination | Regime analysis |
-|-----------------|---------------|:-:|:-:|---|:-:|:-:|
-| `paper`         | 1957 – 2016   | ✅ | ✅ | **0 bps** (gross, matches paper headline) | ✅ | ✅ |
-| `improved`      | 1957 – 2024   | ✅ | ✅ | **Impact-aware** (FIM-style) | ✅ | ✅ |
-| `extended_2024` | 1957 – 2024 (test 2017–2024) | ✅ | ✅ | **Impact-aware** | ✅ | ✅ |
+| Variant              | Sample period                  | Macro × char | Industry dummies | Transaction costs | Forecast combination | Regime analysis |
+|----------------------|--------------------------------|:-:|:-:|---|:-:|:-:|
+| `paper`              | 1957 – 2016                    | ✅ | ✅ | **0 bps** (gross, matches paper headline) | ✅ | ✅ |
+| `improved`           | 1957 – 2024                    | ✅ | ✅ | **Impact-aware** (FIM-style) | ✅ | ✅ |
+| `extended_2024`      | 1957 – 2024 (test 2017–2024)   | ✅ | ✅ | **Impact-aware** | ✅ | ✅ |
+| `extended_ciz_2026`  | 1957 – 2026Q1 (test 2017–2026Q1) | ✅ | ✅ | **Impact-aware** | ✅ | ✅ |
 
 ### Data timeline
 
 * **1957 – 2016** — paper reproduction window.
-* **2017 – 2024** — real-data extension. Verified WRDS coverage on 2026-05-10:
-  `crsp.msf.max_date = 2024-12-31`, `crsp.msenames.max_nameendt = 2024-12-31`,
-  `comp.funda/fundq.max_datadate = 2026-04-30`,
-  `crsp.ccmxpf_linktable.max_linkenddt = 2026-01-30`.
-  The project constant `REAL_DATA_END = 2024-12-31` is the boundary all
-  variants treat as "real". Refresh with
+* **2017 – 2026Q1** — real-data extension via CRSP CIZ/v2. Verified WRDS
+  coverage on 2026-05-10:
+  - Legacy `crsp.msf.max_date = 2024-12-31` (the user's WRDS subscription
+    no longer extends the legacy monthly stock file beyond year-end 2024).
+  - CIZ/v2 monthly stock tables reach further:
+    `crsp.msf_v2.max(mthcaldt) = 2025-12-31`,
+    `crsp.stkmthsecuritydata.max(mthcaldt) = 2025-12-31`,
+    `crsp_q_stock.msf_v2.max(mthcaldt) = 2026-03-31`,
+    `crsp_q_stock.stkmthsecuritydata.max(mthcaldt) = 2026-03-31`.
+  - `comp.funda/fundq.max_datadate = 2026-04-30`,
+    `crsp.ccmxpf_linktable.max_linkenddt = 2026-01-30`.
+
+  The CIZ-aware project constant `REAL_DATA_END = 2026-03-31` is the
+  boundary the `extended_ciz_2026` variant treats as "real". The legacy
+  constant `LEGACY_REAL_DATA_END = 2024-12-31` is preserved for
+  `extended_2024` and any caller that must remain reproducible against
+  the legacy `crsp.msf` endpoint. The `paper` variant is unaffected.
+
+  Refresh coverage with
   `python scripts/check_wrds_coverage.py --wrds-username <user>`
   (writes `outputs/data_coverage/coverage_latest.json`); add `--dry-run`
-  for a credentials-free dump of the last verified coverage.
-* **2025+** — *synthetic stress tests only*. Anything strictly after
+  for a credentials-free dump of the last verified coverage. The
+  manifest now reports both `legacy_real_data_end` and
+  `ciz_real_data_end`, plus the chosen `real_data_end` and
+  next-month-end `synthetic_start`.
+* **2026Q2+** — *synthetic stress tests only*. Anything strictly after
   `REAL_DATA_END` is generated under explicit regimes
-  (`src/synthetic/regimes.py`, default start `SYNTHETIC_START = 2025-01-31`)
-  and is never fed to training.
+  (`src/synthetic/regimes.py`, CIZ-aware default start
+  `SYNTHETIC_START = 2026-04-30`) and is never fed to training.
 
 Each variant writes to its own `outputs/<variant>/` directory and uses its own cached feature matrix at `data/cache/feature_matrix_<variant>.parquet` — they don't overwrite each other.
 

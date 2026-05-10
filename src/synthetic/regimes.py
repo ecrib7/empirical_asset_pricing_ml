@@ -5,11 +5,14 @@ Configuration skeleton for synthetic post-real-data stress testing.
 
 Why this module exists
 ~~~~~~~~~~~~~~~~~~~~~~
-Real WRDS coverage stops at ``REAL_DATA_END = 2024-12-31`` (verified by
-``scripts/check_wrds_coverage.py`` against ``crsp.msf`` and
-``crsp.msenames`` on 2026-05-10). To stress-test the GKX pipeline beyond
-that horizon without leaking lookahead, anything strictly after
-``REAL_DATA_END`` must be marked synthetic and generated under an
+Real WRDS coverage stops at ``REAL_DATA_END = 2026-03-31`` (the furthest
+CIZ/v2 monthly endpoint, observed on ``crsp_q_stock.*`` by
+``scripts/check_wrds_coverage.py`` on 2026-05-10). The legacy
+``crsp.msf`` endpoint (``LEGACY_REAL_DATA_END = 2024-12-31``) is exposed
+separately for legacy-compatible callers (e.g. the ``extended_2024``
+variant). To stress-test the GKX pipeline beyond the real-data horizon
+without leaking lookahead, anything strictly after the configured
+real-data endpoint must be marked synthetic and generated under an
 explicit, reproducible regime.
 
 Status
@@ -18,8 +21,8 @@ This is a *skeleton*. It defines:
 
   * The scenario taxonomy (``SyntheticScenario`` + ``DEFAULT_SCENARIOS``).
   * A typed config object (``SyntheticRegimeConfig``) with explicit
-    defaults — ``synthetic_start = 2025-01-31`` and
-    ``real_data_end = 2024-12-31``, the same boundary the WRDS coverage
+    defaults — CIZ-aware ``synthetic_start = 2026-04-30`` and
+    ``real_data_end = 2026-03-31``, the same boundary the WRDS coverage
     checker writes to ``outputs/data_coverage/``.
   * Validation that synthetic months never collide with real data.
 
@@ -46,9 +49,11 @@ TODO(next-PR)
    that emits a (date, permno, char_*) frame for ``synthetic_start ..
    horizon_end``, with the contract that the last real month and the
    first synthetic month are continuous in the cross-section.
-3. Wire a ``--variant extended_2024 --synthetic <scenario>`` CLI knob
-   into ``main.py`` that splices the synthetic frame onto the real
-   feature matrix *only* in evaluation mode (never in training).
+3. Wire a ``--variant extended_ciz_2026 --synthetic <scenario>`` CLI
+   knob into ``main.py`` that splices the synthetic frame onto the real
+   feature matrix *only* in evaluation mode (never in training). The
+   legacy-compatible ``extended_2024`` variant remains supported via
+   ``LEGACY_REAL_DATA_END`` / ``LEGACY_SYNTHETIC_START``.
 """
 
 from __future__ import annotations
@@ -138,6 +143,17 @@ class SyntheticRegimeConfig:
         # Use month-end frequency. ``periods=horizon_months`` includes start.
         idx = pd.date_range(start=start, periods=self.horizon_months, freq="ME")
         return idx[-1]
+
+
+def next_month_end(date_str: str) -> pd.Timestamp:
+    """Return the first month-end strictly after ``date_str``.
+
+    Used to derive ``synthetic_start`` from ``real_data_end`` (e.g.
+    ``2026-03-31`` -> ``2026-04-30``). If ``date_str`` itself falls on a
+    month-end, the result is the *next* month's end.
+    """
+    ts = pd.Timestamp(date_str)
+    return (ts + pd.offsets.MonthBegin(1)) + pd.offsets.MonthEnd(0)
 
 
 def list_scenarios() -> Tuple[str, ...]:
