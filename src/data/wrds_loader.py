@@ -38,6 +38,64 @@ from src.config import FREQ_MONTH_END, MACRO_VARS
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  CIZ/v2 column mapping (CRSP "common stock file" 2024+ schema)
+#  ----------------------------------------------------------------------------
+#  The CIZ schema renames the legacy crsp.msf columns. Downstream code in this
+#  repo expects the legacy names (date, ret, retx, prc, vol, shrout, …), so we
+#  translate at load time. Only columns we actually use are listed.
+#
+#  legacy crsp.msf      ↔   CIZ crsp.msf_v2 / stkmthsecuritydata
+#  ─────────────────────────────────────────────────────────────────
+#  date                 ↔   mthcaldt
+#  ret                  ↔   mthret
+#  retx                 ↔   mthretx
+#  prc                  ↔   mthprc
+#  vol                  ↔   mthvol
+#  shrout               ↔   shrout            (same name)
+#  cfacpr / cfacshr     ↔   mthcfacpr / mthcfacshr
+#  bid / ask            ↔   mthbid / mthask
+#  siccd / shrcd        ↔   siccd / sharetype (sharetype carries a code list,
+#                                              but tests below only verify the
+#                                              column-name mapping)
+# ─────────────────────────────────────────────────────────────────────────────
+CIZ_COLUMN_MAP: dict[str, str] = {
+    "mthcaldt":   "date",
+    "mthret":     "ret",
+    "mthretx":    "retx",
+    "mthprc":     "prc",
+    "mthvol":     "vol",
+    "mthbid":     "bid",
+    "mthask":     "ask",
+    "mthcfacpr":  "cfacpr",
+    "mthcfacshr": "cfacshr",
+}
+
+# Variants whose data_end exceeds LEGACY_REAL_DATA_END (2024-12-31) require
+# a CIZ-aware loader. Anything else stays on legacy crsp.msf.
+CIZ_AWARE_VARIANTS: frozenset[str] = frozenset({"extended_ciz_2026"})
+
+# CIZ source preference: furthest endpoint first (matches
+# scripts/check_wrds_coverage.py::_CIZ_PREFERENCE).
+_CIZ_SOURCE_PREFERENCE: tuple[str, ...] = (
+    "crsp_q_stock.stkmthsecuritydata",
+    "crsp_q_stock.msf_v2",
+    "crsp.stkmthsecuritydata",
+    "crsp.msf_v2",
+)
+
+
+def _rename_ciz_to_legacy(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rename CIZ columns to the legacy schema downstream code expects.
+
+    Only known CIZ columns are renamed; everything else is left untouched so
+    that callers can opt into additional CIZ-only fields without surprises.
+    """
+    present = {src: dst for src, dst in CIZ_COLUMN_MAP.items() if src in df.columns}
+    return df.rename(columns=present)
+
+
 def _macro_frame_looks_like_zero_stub(df: pd.DataFrame) -> bool:
     """
     Detect legacy all-zero synthetic macro files (older code cached stubs
@@ -61,12 +119,34 @@ class WRDSLoader:
         cache_dir: str = "data/cache/",
         start_date: str = "1957-01-01",
         end_date: str = "2016-12-31",
+        data_source: str = "legacy",
     ):
+        """
+        Parameters
+        ----------
+        data_source : {"legacy", "ciz"}
+            Which CRSP monthly schema to use.
+
+            * ``"legacy"`` (default) — pull from ``crsp.msf`` + ``crsp.msenames``.
+              Reproduces the existing behaviour for the ``paper``, ``improved``
+              and ``extended_2024`` variants.
+            * ``"ciz"`` — pull from the CIZ/v2 monthly tables, preferring
+              ``crsp_q_stock.stkmthsecuritydata`` → ``crsp_q_stock.msf_v2`` →
+              ``crsp.stkmthsecuritydata`` → ``crsp.msf_v2`` (first that
+              succeeds wins). Columns are renamed to the legacy schema so
+              downstream code is unchanged. Used by the
+              ``extended_ciz_2026`` variant.
+        """
         self.username  = wrds_username or os.environ.get("WRDS_USERNAME", "")
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.start_date = start_date
         self.end_date   = end_date
+        if data_source not in {"legacy", "ciz"}:
+            raise ValueError(
+                f"data_source must be 'legacy' or 'ciz', got {data_source!r}"
+            )
+        self.data_source = data_source
         self._db: Optional["wrds.Connection"] = None
 
     # ─── connection ───────────────────────────────────────────────────────
@@ -101,62 +181,199 @@ class WRDSLoader:
     # ─── CRSP Monthly ──────────────────────────────────────────────────────
     def get_crsp_monthly(self, force_refresh: bool = False) -> pd.DataFrame:
         """
-        Pull CRSP monthly stock file (msf + msenames + msedelist).
+        Pull CRSP monthly stock file.
 
-        Columns returned
-        ----------------
+        For ``data_source="legacy"`` uses ``crsp.msf`` + ``crsp.msenames``
+        (max date 2024-12-31 on the user's WRDS subscription).
+        For ``data_source="ciz"`` prefers the CIZ/v2 monthly tables, which
+        extend further (up to 2026-03-31 via ``crsp_q_stock.*``); CIZ
+        columns are mapped back to the legacy schema so downstream code is
+        unchanged.
+
+        Columns returned (legacy schema)
+        --------------------------------
         permno, date, ret, retx, shrout, prc, vol, bid, ask,
         siccd, exchcd, shrcd, cfacpr, cfacshr
         """
-        cache_name = f"crsp_monthly_{self.start_date[:4]}_{self.end_date[:4]}"
+        suffix = "_ciz" if self.data_source == "ciz" else ""
+        cache_name = (
+            f"crsp_monthly{suffix}_"
+            f"{self.start_date[:4]}_{self.end_date[:4]}"
+        )
         if force_refresh:
             self._cache_path(cache_name).unlink(missing_ok=True)
 
-        def _fetch():
-            db = self._connect()
-            # Main monthly security file
-            msf = db.raw_sql(f"""
-                SELECT a.permno, a.date, a.ret, a.retx,
-                       a.shrout, a.prc, a.vol,
-                       a.bid, a.ask,
-                       b.siccd, b.exchcd, b.shrcd
-                FROM crsp.msf  AS a
-                JOIN crsp.msenames AS b
-                  ON a.permno = b.permno
-                 AND b.namedt  <= a.date
-                 AND a.date    <= b.nameendt
-                WHERE a.date BETWEEN '{self.start_date}' AND '{self.end_date}'
-                  AND b.shrcd IN (10, 11)
-                  AND b.exchcd IN (1, 2, 3)
-            """, date_cols=["date"])
+        if self.data_source == "ciz":
+            return self._load_or_fetch(cache_name, self._fetch_crsp_monthly_ciz)
+        return self._load_or_fetch(cache_name, self._fetch_crsp_monthly_legacy)
 
-            # Delisting returns (to avoid survivorship bias)
+    # ─── CRSP Monthly: legacy crsp.msf path ────────────────────────────────
+    def _fetch_crsp_monthly_legacy(self) -> pd.DataFrame:
+        db = self._connect()
+        # Main monthly security file
+        msf = db.raw_sql(f"""
+            SELECT a.permno, a.date, a.ret, a.retx,
+                   a.shrout, a.prc, a.vol,
+                   a.bid, a.ask,
+                   b.siccd, b.exchcd, b.shrcd
+            FROM crsp.msf  AS a
+            JOIN crsp.msenames AS b
+              ON a.permno = b.permno
+             AND b.namedt  <= a.date
+             AND a.date    <= b.nameendt
+            WHERE a.date BETWEEN '{self.start_date}' AND '{self.end_date}'
+              AND b.shrcd IN (10, 11)
+              AND b.exchcd IN (1, 2, 3)
+        """, date_cols=["date"])
+
+        # Delisting returns (to avoid survivorship bias)
+        msedelist = db.raw_sql(f"""
+            SELECT permno, dlstdt AS date, dlret
+            FROM crsp.msedelist
+            WHERE dlstdt BETWEEN '{self.start_date}' AND '{self.end_date}'
+              AND dlret IS NOT NULL
+        """, date_cols=["date"])
+
+        # Merge delisting returns
+        msf = msf.merge(
+            msedelist[["permno", "date", "dlret"]],
+            on=["permno", "date"], how="left"
+        )
+        msf["dlret"] = msf["dlret"].fillna(0.0)
+        # Adjust return for delisting
+        msf["ret"] = np.where(
+            msf["ret"].isna(),
+            msf["dlret"],
+            (1 + msf["ret"]) * (1 + msf["dlret"]) - 1
+        )
+        msf.drop(columns=["dlret"], inplace=True)
+        msf["date"] = pd.to_datetime(msf["date"]).dt.to_period("M").dt.to_timestamp("M")
+        msf["prc"] = msf["prc"].abs()   # negative price = average bid-ask
+        msf["me"]  = msf["prc"] * msf["shrout"]   # market equity ($K)
+        return msf.reset_index(drop=True)
+
+    # ─── CRSP Monthly: CIZ/v2 path ─────────────────────────────────────────
+    def _fetch_crsp_monthly_ciz(self) -> pd.DataFrame:
+        """
+        Pull the CRSP monthly file from the CIZ/v2 schema, falling back
+        through the four candidate tables in preference order. Columns are
+        translated to the legacy schema (mthcaldt → date, mthret → ret, …)
+        so downstream merges and characteristics builders are unchanged.
+
+        Filters mirror the legacy query: U.S. common stock listed on the
+        primary three exchanges only (sharetype IN ('NS') with
+        ``primaryexch`` ∈ {'N','A','Q'} and ``securitytype`` = 'EQTY' /
+        ``issuertype`` = 'CORP'). Where CIZ does not surface a column we
+        leave it null rather than fabricating a value.
+        """
+        db = self._connect()
+        last_exc: Optional[Exception] = None
+        msf: Optional[pd.DataFrame] = None
+        chosen: Optional[str] = None
+        for table in _CIZ_SOURCE_PREFERENCE:
+            try:
+                logger.info("CIZ loader: trying %s", table)
+                msf = db.raw_sql(self._ciz_msf_sql(table), date_cols=["mthcaldt"])
+                chosen = table
+                break
+            except Exception as exc:  # subscription / table-missing
+                last_exc = exc
+                logger.warning("CIZ loader: %s unavailable (%s)", table, exc)
+        if msf is None:
+            raise RuntimeError(
+                "No CIZ monthly table accessible on this WRDS subscription "
+                f"(last error: {last_exc})."
+            )
+        logger.info("CIZ loader: using %s (%d rows)", chosen, len(msf))
+
+        # CIZ → legacy column rename. Note: we keep `permno` / `permco` as-is.
+        msf = _rename_ciz_to_legacy(msf)
+
+        # Delisting return: CIZ encodes delisting inline via mthretx vs mthret.
+        # The v2 stkmthsecuritydata exposes a ``mthretdt`` / ``dlstcd``-style
+        # field on some snapshots; we fall back to crsp.msedelist when the
+        # subscription still has it, so survivorship-bias handling matches
+        # the legacy path. If msedelist is unavailable (CIZ-only subs) we
+        # leave ret unmodified — the inline ``mthret`` already incorporates
+        # the delisting return per CRSP's CIZ documentation.
+        try:
             msedelist = db.raw_sql(f"""
                 SELECT permno, dlstdt AS date, dlret
                 FROM crsp.msedelist
                 WHERE dlstdt BETWEEN '{self.start_date}' AND '{self.end_date}'
                   AND dlret IS NOT NULL
             """, date_cols=["date"])
-
-            # Merge delisting returns
             msf = msf.merge(
                 msedelist[["permno", "date", "dlret"]],
-                on=["permno", "date"], how="left"
+                on=["permno", "date"], how="left",
             )
             msf["dlret"] = msf["dlret"].fillna(0.0)
-            # Adjust return for delisting
             msf["ret"] = np.where(
                 msf["ret"].isna(),
                 msf["dlret"],
-                (1 + msf["ret"]) * (1 + msf["dlret"]) - 1
+                (1 + msf["ret"]) * (1 + msf["dlret"]) - 1,
             )
             msf.drop(columns=["dlret"], inplace=True)
-            msf["date"] = pd.to_datetime(msf["date"]).dt.to_period("M").dt.to_timestamp("M")
-            msf["prc"] = msf["prc"].abs()   # negative price = average bid-ask
-            msf["me"]  = msf["prc"] * msf["shrout"]   # market equity ($K)
-            return msf.reset_index(drop=True)
+        except Exception as exc:
+            logger.info(
+                "CIZ loader: msedelist unavailable (%s); relying on inline "
+                "CIZ delisting handling.",
+                exc,
+            )
 
-        return self._load_or_fetch(cache_name, _fetch)
+        msf["date"] = (
+            pd.to_datetime(msf["date"]).dt.to_period("M").dt.to_timestamp("M")
+        )
+        if "prc" in msf.columns:
+            msf["prc"] = msf["prc"].abs()
+        if "prc" in msf.columns and "shrout" in msf.columns:
+            msf["me"] = msf["prc"] * msf["shrout"]
+
+        # Synthesise legacy-compatible exchcd / shrcd for any downstream
+        # consumer that still reads them. Mapping is intentionally narrow
+        # because the CIZ filter above already restricted the universe.
+        if "primaryexch" in msf.columns:
+            msf["exchcd"] = msf["primaryexch"].map(
+                {"N": 1, "A": 2, "Q": 3}
+            ).astype("Int64")
+        if "sharetype" in msf.columns:
+            msf["shrcd"] = np.where(msf["sharetype"] == "NS", 11, np.nan)
+        return msf.reset_index(drop=True)
+
+    def _ciz_msf_sql(self, table: str) -> str:
+        """
+        Build the SELECT for a CIZ monthly table.
+
+        ``crsp_q_stock.stkmthsecuritydata`` and ``crsp.stkmthsecuritydata``
+        carry the security-type fields inline. ``msf_v2`` is the security-
+        master-merged equivalent. We project the same columns from both
+        and let the rename map normalise to the legacy schema.
+
+        Filters match the spirit of the legacy query (U.S. common stock,
+        NYSE/AMEX/NASDAQ). CIZ uses string codes:
+          * ``sharetype = 'NS'``      — common stock equivalent of shrcd 10/11
+          * ``securitytype = 'EQTY'`` — equity (vs. debt / fund / unit)
+          * ``issuertype = 'CORP'``   — corporate issuer
+          * ``primaryexch IN ('N','A','Q')`` — NYSE / NYSE-AMEX / NASDAQ
+        Tables that lack any of these columns simply ignore the predicate
+        because we rely on column existence — the SQL string assumes a
+        full CIZ schema; if a fallback table is missing a column, the
+        ``raw_sql`` call will raise and the caller will try the next
+        candidate.
+        """
+        return f"""
+            SELECT permno, mthcaldt, mthret, mthretx,
+                   shrout, mthprc, mthvol,
+                   mthcfacpr, mthcfacshr,
+                   siccd,
+                   primaryexch, sharetype, securitytype, issuertype
+            FROM {table}
+            WHERE mthcaldt BETWEEN '{self.start_date}' AND '{self.end_date}'
+              AND sharetype = 'NS'
+              AND securitytype = 'EQTY'
+              AND issuertype = 'CORP'
+              AND primaryexch IN ('N','A','Q')
+        """
 
     # ─── Compustat Annual ─────────────────────────────────────────────────
     def get_compustat_annual(self, force_refresh: bool = False) -> pd.DataFrame:

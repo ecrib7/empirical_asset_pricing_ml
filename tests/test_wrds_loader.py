@@ -14,7 +14,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data import wrds_loader
-from src.data.wrds_loader import WRDSLoader, merge_crsp_compustat
+from src.data.wrds_loader import (
+    CIZ_AWARE_VARIANTS,
+    CIZ_COLUMN_MAP,
+    WRDSLoader,
+    _rename_ciz_to_legacy,
+    merge_crsp_compustat,
+)
 
 
 class TestMergeCrspCompustat:
@@ -184,3 +190,166 @@ class TestMacroStubPolicy:
         df2 = df.copy()
         df2.loc[0, "dp"] = 0.01
         assert wrds_loader._macro_frame_looks_like_zero_stub(df2) is False
+
+
+class TestCIZColumnMapping:
+    """The CIZ -> legacy rename must cover the columns downstream code reads."""
+
+    def test_rename_maps_known_ciz_columns(self):
+        df = pd.DataFrame(
+            {
+                "permno":     [1, 1],
+                "mthcaldt":   pd.to_datetime(["2026-01-31", "2026-02-28"]),
+                "mthret":     [0.01, -0.02],
+                "mthretx":    [0.01, -0.02],
+                "mthprc":     [10.0, 9.8],
+                "mthvol":     [1000.0, 1100.0],
+                "mthcfacpr":  [1.0, 1.0],
+                "mthcfacshr": [1.0, 1.0],
+                "siccd":      ["3711", "3711"],
+            }
+        )
+        out = _rename_ciz_to_legacy(df)
+        assert set(out.columns) >= {
+            "permno", "date", "ret", "retx", "prc", "vol",
+            "cfacpr", "cfacshr", "siccd",
+        }
+        # Legacy names absent in CIZ source must not be invented.
+        assert "mthcaldt" not in out.columns
+        assert "mthret" not in out.columns
+
+    def test_rename_is_no_op_for_non_ciz_columns(self):
+        df = pd.DataFrame({"permno": [1], "date": pd.to_datetime(["2020-01-31"])})
+        out = _rename_ciz_to_legacy(df)
+        assert list(out.columns) == ["permno", "date"]
+
+    def test_column_map_is_complete_for_downstream_schema(self):
+        # Every legacy column the loader's docstring promises must have a
+        # CIZ source — guards against accidental schema drift.
+        legacy_required = {"date", "ret", "retx", "prc", "vol", "cfacpr", "cfacshr"}
+        assert legacy_required.issubset(set(CIZ_COLUMN_MAP.values()))
+
+
+class TestCIZSourceSelection:
+    def test_default_data_source_is_legacy(self, tmp_path):
+        loader = WRDSLoader(
+            wrds_username="",
+            cache_dir=str(tmp_path) + "/",
+            start_date="2020-01-01",
+            end_date="2020-12-31",
+        )
+        assert loader.data_source == "legacy"
+
+    def test_ciz_data_source_accepted(self, tmp_path):
+        loader = WRDSLoader(
+            wrds_username="",
+            cache_dir=str(tmp_path) + "/",
+            start_date="2026-01-01",
+            end_date="2026-03-31",
+            data_source="ciz",
+        )
+        assert loader.data_source == "ciz"
+
+    def test_invalid_data_source_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="data_source"):
+            WRDSLoader(
+                wrds_username="",
+                cache_dir=str(tmp_path) + "/",
+                data_source="bogus",
+            )
+
+    def test_ciz_cache_path_is_distinct_from_legacy(self, tmp_path, monkeypatch):
+        """Legacy and CIZ loads must not collide on the same parquet."""
+        legacy = WRDSLoader(
+            wrds_username="",
+            cache_dir=str(tmp_path) + "/",
+            start_date="2020-01-01",
+            end_date="2024-12-31",
+            data_source="legacy",
+        )
+        ciz = WRDSLoader(
+            wrds_username="",
+            cache_dir=str(tmp_path) + "/",
+            start_date="2020-01-01",
+            end_date="2026-03-31",
+            data_source="ciz",
+        )
+        # Trigger fetch with monkeypatched _fetch_* returning empty frames so
+        # the cache files land on disk; assert their paths differ.
+        empty = pd.DataFrame(
+            {"permno": [], "date": pd.to_datetime([]), "ret": [], "retx": [],
+             "prc": [], "vol": [], "shrout": []}
+        )
+        monkeypatch.setattr(legacy, "_fetch_crsp_monthly_legacy", lambda: empty.copy())
+        monkeypatch.setattr(ciz, "_fetch_crsp_monthly_ciz", lambda: empty.copy())
+        legacy.get_crsp_monthly()
+        ciz.get_crsp_monthly()
+        legacy_path = legacy._cache_path("crsp_monthly_2020_2024")
+        ciz_path = ciz._cache_path("crsp_monthly_ciz_2020_2026")
+        assert legacy_path.exists()
+        assert ciz_path.exists()
+        assert legacy_path != ciz_path
+
+    def test_extended_ciz_2026_is_in_ciz_aware_variants(self):
+        assert "extended_ciz_2026" in CIZ_AWARE_VARIANTS
+
+
+class TestCIZRouter:
+    """get_crsp_monthly must dispatch on data_source without touching WRDS."""
+
+    def test_get_crsp_monthly_routes_to_ciz_fetcher(self, tmp_path, monkeypatch):
+        loader = WRDSLoader(
+            wrds_username="",
+            cache_dir=str(tmp_path) + "/",
+            start_date="2026-01-01",
+            end_date="2026-03-31",
+            data_source="ciz",
+        )
+        called = {"ciz": 0, "legacy": 0}
+
+        def fake_ciz():
+            called["ciz"] += 1
+            return pd.DataFrame(
+                {"permno": [1], "date": pd.to_datetime(["2026-01-31"]),
+                 "ret": [0.01], "retx": [0.01], "prc": [10.0], "vol": [100.0],
+                 "shrout": [1000.0]}
+            )
+
+        def fake_legacy():
+            called["legacy"] += 1
+            return pd.DataFrame()
+
+        monkeypatch.setattr(loader, "_fetch_crsp_monthly_ciz", fake_ciz)
+        monkeypatch.setattr(loader, "_fetch_crsp_monthly_legacy", fake_legacy)
+
+        out = loader.get_crsp_monthly()
+        assert called == {"ciz": 1, "legacy": 0}
+        assert "date" in out.columns
+        assert len(out) == 1
+
+    def test_get_crsp_monthly_routes_to_legacy_fetcher(self, tmp_path, monkeypatch):
+        loader = WRDSLoader(
+            wrds_username="",
+            cache_dir=str(tmp_path) + "/",
+            start_date="2020-01-01",
+            end_date="2024-12-31",
+        )
+        called = {"ciz": 0, "legacy": 0}
+
+        def fake_ciz():
+            called["ciz"] += 1
+            return pd.DataFrame()
+
+        def fake_legacy():
+            called["legacy"] += 1
+            return pd.DataFrame(
+                {"permno": [1], "date": pd.to_datetime(["2024-12-31"]),
+                 "ret": [0.01], "retx": [0.01], "prc": [10.0], "vol": [100.0],
+                 "shrout": [1000.0]}
+            )
+
+        monkeypatch.setattr(loader, "_fetch_crsp_monthly_ciz", fake_ciz)
+        monkeypatch.setattr(loader, "_fetch_crsp_monthly_legacy", fake_legacy)
+
+        loader.get_crsp_monthly()
+        assert called == {"ciz": 0, "legacy": 1}

@@ -94,6 +94,16 @@ python main.py --mode evaluate   --variant improved
 python main.py --mode regimes    --variant improved
 python main.py --mode importance --variant improved --models OLS-3 ENet+H PCR PLS GBRT+H
 
+# CIZ-aware extension (1957-2026Q1, impact-aware TC, CRSP CIZ/v2 tables)
+# Uses crsp_q_stock.stkmthsecuritydata / msf_v2 (with fallback to
+# crsp.stkmthsecuritydata / msf_v2) and maps the CIZ columns
+# (mthcaldt → date, mthret → ret, …) back to the legacy schema, so the
+# rest of the pipeline is unchanged.
+python main.py --mode data-only  --variant extended_ciz_2026 --wrds-username YOUR_USER
+python main.py --mode train      --variant extended_ciz_2026 --models OLS-3 ENet+H PCR PLS GBRT+H RF NN1 NN2 NN3 NN4 NN5
+python main.py --mode evaluate   --variant extended_ciz_2026
+python main.py --mode regimes    --variant extended_ciz_2026
+
 # Launch the dashboard (variant selector in sidebar)
 streamlit run src/dashboard/app.py
 ```

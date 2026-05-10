@@ -180,8 +180,30 @@ def run_data_only(args) -> None:
         )
 
 
+def _crsp_data_source(cfg: dict) -> str:
+    """
+    Decide which CRSP monthly schema to load for a variant.
+
+    The legacy ``crsp.msf`` only reaches 2024-12-31 on the user's WRDS
+    subscription, so any variant whose ``data_end`` is strictly after
+    ``LEGACY_REAL_DATA_END`` must use the CIZ/v2 path.
+    """
+    from src.config import LEGACY_REAL_DATA_END
+    from src.data.wrds_loader import CIZ_AWARE_VARIANTS
+
+    if cfg["name"] in CIZ_AWARE_VARIANTS:
+        return "ciz"
+    if cfg["data_end"] > LEGACY_REAL_DATA_END:
+        return "ciz"
+    return "legacy"
+
+
 def _crsp_cache_path(cfg: dict) -> Path:
-    return Path(f"data/cache/crsp_monthly_{cfg['data_start'][:4]}_{cfg['data_end'][:4]}.parquet")
+    suffix = "_ciz" if _crsp_data_source(cfg) == "ciz" else ""
+    return Path(
+        f"data/cache/crsp_monthly{suffix}_"
+        f"{cfg['data_start'][:4]}_{cfg['data_end'][:4]}.parquet"
+    )
 
 
 def _comp_a_cache_path(cfg: dict) -> Path:
@@ -208,13 +230,17 @@ def _data_step_fetch(args, cfg: dict) -> None:
     """Step 1: Fetch raw tables from WRDS and cache as parquet, plus build macro from GWZ zip."""
     from src.data.wrds_loader import WRDSLoader
 
-    logger.info(f"=== Data Step 1/4: Fetching WRDS data "
-                f"({cfg['data_start']} → {cfg['data_end']}) ===")
+    data_source = _crsp_data_source(cfg)
+    logger.info(
+        f"=== Data Step 1/4: Fetching WRDS data "
+        f"({cfg['data_start']} → {cfg['data_end']}, source={data_source}) ==="
+    )
     loader = WRDSLoader(
         wrds_username=args.wrds_username,
         cache_dir="data/cache/",
         start_date=cfg["data_start"],
         end_date=cfg["data_end"],
+        data_source=data_source,
     )
     loader.get_crsp_monthly()
     loader.get_compustat_annual()
@@ -615,12 +641,17 @@ def run_full_pipeline(args) -> dict:
     Path(cfg["model_dir"]).mkdir(parents=True, exist_ok=True)
 
     variant = cfg["name"]
-    logger.info(f"=== Step 1: Loading WRDS data (variant={variant!r}) ===")
+    data_source = _crsp_data_source(cfg)
+    logger.info(
+        f"=== Step 1: Loading WRDS data (variant={variant!r}, "
+        f"source={data_source}) ==="
+    )
     loader = WRDSLoader(
         wrds_username=args.wrds_username,
         cache_dir="data/cache/",
         start_date=cfg["data_start"],
         end_date=cfg["data_end"],
+        data_source=data_source,
     )
     crsp   = loader.get_crsp_monthly()
     comp_a = loader.get_compustat_annual()
@@ -1072,15 +1103,19 @@ def parse_args():
     )
     parser.add_argument(
         "--variant",
-        choices=["paper", "improved"],
+        choices=["paper", "improved", "extended_2024", "extended_ciz_2026"],
         default="paper",
         help=(
             "Which pipeline to run. "
             "'paper' = strict GKX (2019) reproduction (1957-2016, TC=0). "
-            "'improved' = extended sample to 2024 + transaction costs modelled "
-            "(macro interactions are on in both). "
+            "'improved' = extended sample to 2024 + transaction costs modelled. "
+            "'extended_2024' = real-only post-paper extension pinned to legacy "
+            "crsp.msf (2024-12-31). "
+            "'extended_ciz_2026' = CIZ/v2-aware extension to 2026-03-31 using "
+            "the crsp_q_stock.* monthly tables (legacy schema preserved via "
+            "column mapping). Macro interactions are on in all variants. "
             "Each variant writes to its own outputs/<variant>/ directory and "
-            "uses its own cached feature matrix, so the two pipelines do not "
+            "uses its own cached feature matrix, so the pipelines do not "
             "overwrite each other."
         ),
     )
