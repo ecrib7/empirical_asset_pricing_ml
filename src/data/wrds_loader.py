@@ -60,16 +60,53 @@ logger = logging.getLogger(__name__)
 #                                              column-name mapping)
 # ─────────────────────────────────────────────────────────────────────────────
 CIZ_COLUMN_MAP: dict[str, str] = {
-    "mthcaldt":   "date",
-    "mthret":     "ret",
-    "mthretx":    "retx",
-    "mthprc":     "prc",
-    "mthvol":     "vol",
-    "mthbid":     "bid",
-    "mthask":     "ask",
-    "mthcfacpr":  "cfacpr",
-    "mthcfacshr": "cfacshr",
+    "mthcaldt":     "date",
+    "mthret":       "ret",
+    "mthretx":      "retx",
+    "mthprc":       "prc",
+    "mthvol":       "vol",
+    "mthbid":       "bid",
+    "mthask":       "ask",
+    "mthcfacpr":    "cfacpr",
+    "mthcfacshr":   "cfacshr",
+    # CIZ alias variants observed across WRDS subscriptions: some snapshots
+    # expose only the cumulative-factor names (mthcumfacpr / mthcumfacshr)
+    # rather than the period-factor names. Both map to the same legacy
+    # adjustment columns; whichever is present in the source table wins.
+    "mthcumfacpr":  "cfacpr",
+    "mthcumfacshr": "cfacshr",
+    # mthcap (market cap, in $) is CIZ's pre-computed market equity. We
+    # surface it as "me" so downstream code that already has a ``me``
+    # column from the legacy path keeps working.
+    "mthcap":       "me",
 }
+
+# Optional columns we project from CIZ tables in addition to the required
+# minimum (permno, mthcaldt, mthret, mthprc). Each is included in the SELECT
+# only if information_schema confirms it exists on the chosen table.
+_CIZ_OPTIONAL_SELECT_COLUMNS: tuple[str, ...] = (
+    "mthretx", "mthvol", "mthbid", "mthask",
+    "shrout", "mthcap",
+    "mthcfacpr", "mthcfacshr", "mthcumfacpr", "mthcumfacshr",
+    "siccd",
+    "primaryexch", "sharetype", "securitytype", "issuertype",
+)
+
+# Optional WHERE-clause filters on CIZ tables. Each predicate is added only
+# if its column is present in information_schema; missing columns trigger a
+# logged warning and the predicate is skipped instead of failing the query.
+_CIZ_OPTIONAL_FILTERS: tuple[tuple[str, str], ...] = (
+    ("sharetype",    "sharetype = 'NS'"),
+    ("securitytype", "securitytype = 'EQTY'"),
+    ("issuertype",   "issuertype = 'CORP'"),
+    ("primaryexch",  "primaryexch IN ('N','A','Q')"),
+)
+
+# Required minimum columns. If any of these is missing on a candidate table
+# we skip the candidate and try the next one in the preference list.
+_CIZ_REQUIRED_COLUMNS: frozenset[str] = frozenset(
+    {"permno", "mthcaldt", "mthret", "mthprc"}
+)
 
 # Variants whose data_end exceeds LEGACY_REAL_DATA_END (2024-12-31) require
 # a CIZ-aware loader. Anything else stays on legacy crsp.msf.
@@ -91,9 +128,75 @@ def _rename_ciz_to_legacy(df: pd.DataFrame) -> pd.DataFrame:
 
     Only known CIZ columns are renamed; everything else is left untouched so
     that callers can opt into additional CIZ-only fields without surprises.
+
+    If a row contains both a "primary" alias and a fallback alias mapping to
+    the same legacy column (e.g. both ``mthcfacpr`` and ``mthcumfacpr``),
+    the primary wins — the fallback is dropped before renaming so we never
+    produce duplicate column labels.
     """
+    # Resolve alias collisions: when two CIZ source columns map to the same
+    # legacy name, prefer the period-factor name (mthcfacpr / mthcfacshr)
+    # over the cumulative-factor alias.
+    df = df.copy()
+    if "mthcfacpr" in df.columns and "mthcumfacpr" in df.columns:
+        df = df.drop(columns=["mthcumfacpr"])
+    if "mthcfacshr" in df.columns and "mthcumfacshr" in df.columns:
+        df = df.drop(columns=["mthcumfacshr"])
     present = {src: dst for src, dst in CIZ_COLUMN_MAP.items() if src in df.columns}
     return df.rename(columns=present)
+
+
+def _ciz_table_columns(db, table: str) -> set[str]:
+    """
+    Return the set of column names available for a CIZ table, queried via
+    information_schema. ``table`` is "schema.table"; an unqualified name is
+    treated as falling in the default schema.
+    """
+    if "." in table:
+        schema, name = table.split(".", 1)
+    else:
+        schema, name = "public", table
+    sql = (
+        "SELECT column_name FROM information_schema.columns "
+        f"WHERE table_schema = '{schema}' AND table_name = '{name}'"
+    )
+    df = db.raw_sql(sql)
+    if df is None or len(df) == 0:
+        return set()
+    return {str(c).lower() for c in df["column_name"].tolist()}
+
+
+def _build_ciz_msf_sql(
+    table: str,
+    columns: set[str],
+    start_date: str,
+    end_date: str,
+) -> str:
+    """
+    Build a schema-aware SELECT for ``table`` given the columns the table
+    actually exposes (per information_schema). Optional columns and filters
+    are dropped silently when absent; missing optional filter columns emit a
+    warning. Required columns are assumed already validated by the caller.
+    """
+    select_cols = ["permno", "mthcaldt", "mthret", "mthprc"]
+    for col in _CIZ_OPTIONAL_SELECT_COLUMNS:
+        if col in columns and col not in select_cols:
+            select_cols.append(col)
+
+    where_clauses = [f"mthcaldt BETWEEN '{start_date}' AND '{end_date}'"]
+    for col, predicate in _CIZ_OPTIONAL_FILTERS:
+        if col in columns:
+            where_clauses.append(predicate)
+        else:
+            logger.warning(
+                "CIZ loader: %s lacks optional filter column '%s'; "
+                "skipping predicate %r.",
+                table, col, predicate,
+            )
+
+    select_sql = ", ".join(select_cols)
+    where_sql = " AND ".join(where_clauses)
+    return f"SELECT {select_sql} FROM {table} WHERE {where_sql}"
 
 
 def _macro_frame_looks_like_zero_stub(df: pd.DataFrame) -> bool:
@@ -272,11 +375,27 @@ class WRDSLoader:
         chosen: Optional[str] = None
         for table in _CIZ_SOURCE_PREFERENCE:
             try:
-                logger.info("CIZ loader: trying %s", table)
-                msf = db.raw_sql(self._ciz_msf_sql(table), date_cols=["mthcaldt"])
+                logger.info("CIZ loader: inspecting schema of %s", table)
+                cols = _ciz_table_columns(db, table)
+                if not cols:
+                    logger.warning(
+                        "CIZ loader: %s not visible in information_schema; "
+                        "skipping.", table,
+                    )
+                    continue
+                missing_required = _CIZ_REQUIRED_COLUMNS - cols
+                if missing_required:
+                    logger.warning(
+                        "CIZ loader: %s missing required columns %s; "
+                        "skipping.", table, sorted(missing_required),
+                    )
+                    continue
+                sql = _build_ciz_msf_sql(table, cols, self.start_date, self.end_date)
+                logger.info("CIZ loader: querying %s", table)
+                msf = db.raw_sql(sql, date_cols=["mthcaldt"])
                 chosen = table
                 break
-            except Exception as exc:  # subscription / table-missing
+            except Exception as exc:  # subscription / table-missing / runtime
                 last_exc = exc
                 logger.warning("CIZ loader: %s unavailable (%s)", table, exc)
         if msf is None:
@@ -326,7 +445,20 @@ class WRDSLoader:
         )
         if "prc" in msf.columns:
             msf["prc"] = msf["prc"].abs()
-        if "prc" in msf.columns and "shrout" in msf.columns:
+        # Market equity: prefer CIZ's pre-computed mthcap (renamed to "me"),
+        # else derive from prc*shrout. If shrout is missing but mthcap and
+        # prc are present, recover shrout = me / prc so downstream code that
+        # still reads ``shrout`` keeps working. CRSP's mthcap is in dollars
+        # and shrout in thousands → we keep the legacy-equivalent units by
+        # matching the legacy formula (prc*shrout).
+        if "shrout" not in msf.columns and "me" in msf.columns and "prc" in msf.columns:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                msf["shrout"] = np.where(
+                    (msf["prc"].abs() > 0) & msf["me"].notna(),
+                    msf["me"] / msf["prc"].abs(),
+                    np.nan,
+                )
+        if "me" not in msf.columns and "prc" in msf.columns and "shrout" in msf.columns:
             msf["me"] = msf["prc"] * msf["shrout"]
 
         # Synthesise legacy-compatible exchcd / shrcd for any downstream
@@ -339,41 +471,6 @@ class WRDSLoader:
         if "sharetype" in msf.columns:
             msf["shrcd"] = np.where(msf["sharetype"] == "NS", 11, np.nan)
         return msf.reset_index(drop=True)
-
-    def _ciz_msf_sql(self, table: str) -> str:
-        """
-        Build the SELECT for a CIZ monthly table.
-
-        ``crsp_q_stock.stkmthsecuritydata`` and ``crsp.stkmthsecuritydata``
-        carry the security-type fields inline. ``msf_v2`` is the security-
-        master-merged equivalent. We project the same columns from both
-        and let the rename map normalise to the legacy schema.
-
-        Filters match the spirit of the legacy query (U.S. common stock,
-        NYSE/AMEX/NASDAQ). CIZ uses string codes:
-          * ``sharetype = 'NS'``      — common stock equivalent of shrcd 10/11
-          * ``securitytype = 'EQTY'`` — equity (vs. debt / fund / unit)
-          * ``issuertype = 'CORP'``   — corporate issuer
-          * ``primaryexch IN ('N','A','Q')`` — NYSE / NYSE-AMEX / NASDAQ
-        Tables that lack any of these columns simply ignore the predicate
-        because we rely on column existence — the SQL string assumes a
-        full CIZ schema; if a fallback table is missing a column, the
-        ``raw_sql`` call will raise and the caller will try the next
-        candidate.
-        """
-        return f"""
-            SELECT permno, mthcaldt, mthret, mthretx,
-                   shrout, mthprc, mthvol,
-                   mthcfacpr, mthcfacshr,
-                   siccd,
-                   primaryexch, sharetype, securitytype, issuertype
-            FROM {table}
-            WHERE mthcaldt BETWEEN '{self.start_date}' AND '{self.end_date}'
-              AND sharetype = 'NS'
-              AND securitytype = 'EQTY'
-              AND issuertype = 'CORP'
-              AND primaryexch IN ('N','A','Q')
-        """
 
     # ─── Compustat Annual ─────────────────────────────────────────────────
     def get_compustat_annual(self, force_refresh: bool = False) -> pd.DataFrame:

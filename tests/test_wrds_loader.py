@@ -18,6 +18,7 @@ from src.data.wrds_loader import (
     CIZ_AWARE_VARIANTS,
     CIZ_COLUMN_MAP,
     WRDSLoader,
+    _build_ciz_msf_sql,
     _rename_ciz_to_legacy,
     merge_crsp_compustat,
 )
@@ -353,3 +354,315 @@ class TestCIZRouter:
 
         loader.get_crsp_monthly()
         assert called == {"ciz": 0, "legacy": 1}
+
+
+class _FakeWRDSConn:
+    """
+    Minimal stand-in for ``wrds.Connection`` used by the CIZ schema-aware
+    tests. ``raw_sql`` distinguishes information_schema introspection from
+    payload queries via a per-table fixture.
+
+    ``tables`` maps "schema.table" → {"columns": set[str], "rows": DataFrame}.
+    The introspection query returns a frame with a ``column_name`` column;
+    payload queries return the configured ``rows``.
+    """
+
+    def __init__(self, tables: dict[str, dict]):
+        self.tables = tables
+        self.last_payload_sql: str | None = None
+        self.payload_calls: list[tuple[str, str]] = []  # (table, sql)
+
+    def raw_sql(self, sql: str, date_cols=None):
+        s = sql.strip()
+        # information_schema.columns lookups
+        if "information_schema.columns" in s:
+            schema = _between(s, "table_schema = '", "'")
+            name = _between(s, "table_name = '", "'")
+            key = f"{schema}.{name}"
+            cols = self.tables.get(key, {}).get("columns")
+            if cols is None:
+                return pd.DataFrame({"column_name": []})
+            return pd.DataFrame({"column_name": sorted(cols)})
+        # Payload SELECT … FROM <schema.table> …
+        for key, spec in self.tables.items():
+            if f"FROM {key}" in s:
+                self.last_payload_sql = s
+                self.payload_calls.append((key, s))
+                return spec["rows"].copy()
+        raise RuntimeError(f"Unexpected SQL: {sql}")
+
+    def close(self):
+        pass
+
+
+def _between(text: str, start: str, end: str) -> str:
+    i = text.index(start) + len(start)
+    j = text.index(end, i)
+    return text[i:j]
+
+
+class TestCIZSchemaAwareSelect:
+    """`_build_ciz_msf_sql` projects only the columns the table exposes."""
+
+    def test_required_columns_only(self):
+        sql = _build_ciz_msf_sql(
+            "crsp_q_stock.stkmthsecuritydata",
+            columns={"permno", "mthcaldt", "mthret", "mthprc"},
+            start_date="2026-01-01",
+            end_date="2026-03-31",
+        )
+        # Required columns appear; optional ones do not.
+        assert "permno" in sql and "mthcaldt" in sql
+        assert "mthret" in sql and "mthprc" in sql
+        for absent in (
+            "shrout", "mthcap", "mthcfacpr", "mthcumfacpr",
+            "mthcfacshr", "mthcumfacshr", "mthvol",
+        ):
+            assert absent not in sql, f"{absent} unexpectedly selected"
+        # All optional WHERE filters skipped because columns are absent.
+        for absent in ("sharetype", "securitytype", "issuertype", "primaryexch"):
+            assert absent not in sql, f"{absent} predicate unexpectedly emitted"
+
+    def test_stkmth_without_shrout_uses_mthcap(self):
+        # Real WRDS error: stkmthsecuritydata lacks `shrout`. With `mthcap`
+        # available the SELECT must still succeed.
+        cols = {
+            "permno", "mthcaldt", "mthret", "mthretx", "mthprc",
+            "mthvol", "mthcap",
+            "primaryexch", "sharetype", "securitytype", "issuertype", "siccd",
+        }
+        sql = _build_ciz_msf_sql(
+            "crsp_q_stock.stkmthsecuritydata",
+            columns=cols,
+            start_date="1957-01-01",
+            end_date="2026-03-31",
+        )
+        assert "mthcap" in sql
+        assert "shrout" not in sql  # absent on this table — must not be selected
+        assert "sharetype = 'NS'" in sql
+        assert "primaryexch IN ('N','A','Q')" in sql
+
+    def test_msf_v2_with_cumulative_factor_alias(self):
+        # Real WRDS error: msf_v2 lacks `mthcfacpr` / `mthcfacshr` but exposes
+        # the cumulative-factor aliases. The SQL must select those instead.
+        cols = {
+            "permno", "mthcaldt", "mthret", "mthretx", "mthprc",
+            "mthvol", "shrout",
+            "mthcumfacpr", "mthcumfacshr",
+            "primaryexch", "sharetype", "securitytype", "issuertype", "siccd",
+        }
+        sql = _build_ciz_msf_sql(
+            "crsp_q_stock.msf_v2", cols, "2020-01-01", "2026-03-31",
+        )
+        assert "mthcumfacpr" in sql
+        assert "mthcumfacshr" in sql
+        # The period-factor names must NOT appear if absent on the table.
+        assert "mthcfacpr," not in sql and " mthcfacpr " not in sql
+        assert "mthcfacshr," not in sql and " mthcfacshr " not in sql
+
+    def test_optional_filter_skipped_when_column_absent(self):
+        # primaryexch and sharetype absent → predicates must be omitted.
+        cols = {"permno", "mthcaldt", "mthret", "mthprc", "siccd"}
+        sql = _build_ciz_msf_sql(
+            "crsp.msf_v2", cols, "2026-01-01", "2026-03-31",
+        )
+        assert "primaryexch" not in sql
+        assert "sharetype" not in sql
+        # Date filter still present.
+        assert "mthcaldt BETWEEN" in sql
+
+    def test_alias_collision_drops_cumulative_when_period_present(self):
+        # When both adjustment-factor names are present, both are selected
+        # (the rename collision is handled at the dataframe level).
+        cols = {
+            "permno", "mthcaldt", "mthret", "mthprc",
+            "mthcfacpr", "mthcumfacpr",
+        }
+        sql = _build_ciz_msf_sql("crsp.msf_v2", cols, "2026-01-01", "2026-03-31")
+        assert "mthcfacpr" in sql
+        assert "mthcumfacpr" in sql
+
+
+class TestCIZRenameAliasCollision:
+    def test_period_factor_wins_over_cumulative(self):
+        df = pd.DataFrame(
+            {
+                "permno": [1],
+                "mthcaldt": pd.to_datetime(["2026-01-31"]),
+                "mthret": [0.01],
+                "mthprc": [10.0],
+                "mthcfacpr": [1.0],
+                "mthcumfacpr": [1.5],
+                "mthcfacshr": [1.0],
+                "mthcumfacshr": [1.5],
+            }
+        )
+        out = _rename_ciz_to_legacy(df)
+        # Each legacy adjustment column appears exactly once and carries the
+        # period-factor (mthcfac*) value, not the cumulative one.
+        assert list(out.columns).count("cfacpr") == 1
+        assert list(out.columns).count("cfacshr") == 1
+        assert float(out["cfacpr"].iloc[0]) == 1.0
+        assert float(out["cfacshr"].iloc[0]) == 1.0
+
+    def test_cumulative_alias_used_when_period_absent(self):
+        df = pd.DataFrame(
+            {
+                "permno": [1],
+                "mthcaldt": pd.to_datetime(["2026-01-31"]),
+                "mthret": [0.01],
+                "mthprc": [10.0],
+                "mthcumfacpr": [1.5],
+                "mthcumfacshr": [1.5],
+            }
+        )
+        out = _rename_ciz_to_legacy(df)
+        assert "cfacpr" in out.columns
+        assert "cfacshr" in out.columns
+        assert float(out["cfacpr"].iloc[0]) == 1.5
+
+    def test_mthcap_renamed_to_me(self):
+        df = pd.DataFrame(
+            {
+                "permno": [1],
+                "mthcaldt": pd.to_datetime(["2026-01-31"]),
+                "mthret": [0.01],
+                "mthprc": [10.0],
+                "mthcap": [123456.0],
+            }
+        )
+        out = _rename_ciz_to_legacy(df)
+        assert "me" in out.columns
+        assert float(out["me"].iloc[0]) == 123456.0
+
+
+class TestCIZFetchEndToEnd:
+    """End-to-end: _fetch_crsp_monthly_ciz must accept tables that are
+    missing optional columns or use alias names, derive shrout from mthcap
+    when absent, and not crash on optional filter columns being missing."""
+
+    @staticmethod
+    def _row(payload: dict, n: int = 1) -> pd.DataFrame:
+        return pd.DataFrame({k: [v] * n for k, v in payload.items()})
+
+    def _make_loader(self, tmp_path, fake_db):
+        loader = WRDSLoader(
+            wrds_username="",
+            cache_dir=str(tmp_path) + "/",
+            start_date="2026-01-01",
+            end_date="2026-03-31",
+            data_source="ciz",
+        )
+        loader._db = fake_db  # bypass real wrds.Connection
+        # Bypass HAS_WRDS guard in _connect — the fake connection is already
+        # attached, so we just want _connect to return self._db.
+        loader._connect = lambda: loader._db  # type: ignore[method-assign]
+        return loader
+
+    def test_stkmth_without_shrout_succeeds_and_derives_shrout(
+        self, tmp_path, monkeypatch
+    ):
+        # stkmthsecuritydata: no `shrout`, but `mthcap` and `mthprc` present.
+        rows = self._row(
+            {
+                "permno": 10,
+                "mthcaldt": pd.Timestamp("2026-01-31"),
+                "mthret": 0.05,
+                "mthretx": 0.05,
+                "mthprc": 50.0,
+                "mthvol": 1000.0,
+                "mthcap": 500_000.0,  # → shrout = 500000 / 50 = 10000
+                "primaryexch": "N",
+                "sharetype": "NS",
+                "securitytype": "EQTY",
+                "issuertype": "CORP",
+                "siccd": "3711",
+            }
+        )
+        fake = _FakeWRDSConn(
+            {
+                "crsp_q_stock.stkmthsecuritydata": {
+                    "columns": set(rows.columns) | {"permno"},
+                    "rows": rows,
+                },
+            }
+        )
+        loader = self._make_loader(tmp_path, fake)
+        # msedelist branch must fail-soft, not raise.
+        df = loader._fetch_crsp_monthly_ciz()
+        assert "date" in df.columns
+        assert "ret" in df.columns and "prc" in df.columns
+        assert "me" in df.columns
+        assert "shrout" in df.columns
+        # Derived shrout = me / |prc|
+        assert float(df["shrout"].iloc[0]) == pytest.approx(10_000.0)
+        assert float(df["me"].iloc[0]) == pytest.approx(500_000.0)
+
+    def test_msf_v2_with_cumfac_alias_succeeds(self, tmp_path):
+        rows = self._row(
+            {
+                "permno": 11,
+                "mthcaldt": pd.Timestamp("2026-02-28"),
+                "mthret": -0.01,
+                "mthretx": -0.01,
+                "mthprc": 25.0,
+                "mthvol": 800.0,
+                "shrout": 4_000.0,  # already present; shrout-derivation skipped
+                "mthcumfacpr": 1.25,
+                "mthcumfacshr": 1.25,
+                "primaryexch": "Q",
+                "sharetype": "NS",
+                "securitytype": "EQTY",
+                "issuertype": "CORP",
+                "siccd": "7372",
+            }
+        )
+        # First-preference table missing entirely (no columns); second
+        # preference (msf_v2) succeeds.
+        fake = _FakeWRDSConn(
+            {
+                "crsp_q_stock.stkmthsecuritydata": {"columns": set(), "rows": rows.iloc[0:0]},
+                "crsp_q_stock.msf_v2": {
+                    "columns": set(rows.columns) | {"permno"},
+                    "rows": rows,
+                },
+            }
+        )
+        loader = self._make_loader(tmp_path, fake)
+        df = loader._fetch_crsp_monthly_ciz()
+        # cfacpr / cfacshr were aliased from cumulative-factor names.
+        assert "cfacpr" in df.columns
+        assert "cfacshr" in df.columns
+        assert float(df["cfacpr"].iloc[0]) == pytest.approx(1.25)
+        # me derived from prc * shrout because mthcap absent.
+        assert "me" in df.columns
+        assert float(df["me"].iloc[0]) == pytest.approx(25.0 * 4_000.0)
+
+    def test_optional_filter_columns_missing_does_not_crash(self, tmp_path):
+        # Bare-minimum CIZ table: no sharetype / primaryexch / securitytype /
+        # issuertype. The query must still succeed without those predicates.
+        rows = self._row(
+            {
+                "permno": 12,
+                "mthcaldt": pd.Timestamp("2026-03-31"),
+                "mthret": 0.02,
+                "mthprc": 12.0,
+                "mthcap": 240_000.0,  # → shrout = 20000
+            }
+        )
+        fake = _FakeWRDSConn(
+            {
+                "crsp_q_stock.stkmthsecuritydata": {
+                    "columns": set(rows.columns),
+                    "rows": rows,
+                },
+            }
+        )
+        loader = self._make_loader(tmp_path, fake)
+        df = loader._fetch_crsp_monthly_ciz()
+        assert len(df) == 1
+        assert float(df["shrout"].iloc[0]) == pytest.approx(20_000.0)
+        # SQL emitted skipped the missing optional filters.
+        last_sql = fake.last_payload_sql
+        for absent in ("sharetype", "securitytype", "issuertype", "primaryexch"):
+            assert absent not in last_sql, f"{absent} predicate emitted unexpectedly"
