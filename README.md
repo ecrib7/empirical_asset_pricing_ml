@@ -162,9 +162,28 @@ used to (a) populate the dashboard when no real data is available and
 regimes inspired by the [anticor-trader](https://github.com/cvxgrp/anticor-trader)
 scenario taxonomy.
 
-Each variant covers exactly 120 month-ends (`2026-04-30 .. 2036-03-31`)
-and writes the standard artifact set into `outputs/<variant>/` so the
-dashboard reads them unchanged. Available scenarios:
+For every future-2026 variant the source of truth is a **stock-level
+synthetic panel** written to
+`data/cache/synthetic_panels/<variant>.parquet`. Each panel covers
+exactly 120 month-ends (`2026-04-30 .. 2036-03-31`) and 800 synthetic
+permnos (`900000..900799`), for 96,000 rows per scenario. Columns
+include the realised return, the latent expected return, a synthetic
+market / common factor, market beta, six style characteristics
+(`size`, `value`, `momentum`, `quality`, `volatility`, `liquidity`),
+and three `model_signal_{strong,medium,weak}` columns that emulate
+model predictions at different "skill" levels. The decile returns,
+H-L portfolios, turnover, gross/net Sharpes and per-model pickles
+that flow into `outputs/<variant>/` are then derived from the panel
+by sorting stocks each month on a per-model signal — not from a
+decile-only shortcut.
+
+These artifacts are deliberately labelled
+`synthetic_training`/`synthetic_evaluation` in the metrics JSON and
+per-model pickles. They emulate model output shapes for dashboard
+compatibility but **are not real WRDS training results and must not
+be presented as forecasts**.
+
+Available scenarios:
 
 | Variant                             | Regime                                          |
 |-------------------------------------|-------------------------------------------------|
@@ -177,11 +196,21 @@ dashboard reads them unchanged. Available scenarios:
 | `future2026_factor_rotation`        | Dominant style/factor sign flips every 18 mo    |
 
 ```bash
-# Generate one scenario
+# Generate one scenario (also writes the stock-level parquet panel)
 python generate_synthetic_results.py --variant future2026_base
 
 # Generate all seven future scenarios in one shot
 python generate_synthetic_results.py --variant future2026_all
+
+# (Re)generate panel parquets only — skip outputs/
+python generate_synthetic_results.py --variant future2026_all --panels-only
+
+# Build outputs from an existing panel parquet (fail if missing)
+python generate_synthetic_results.py --variant future2026_base --from-panel
+
+# Override panel directory
+python generate_synthetic_results.py --variant future2026_all \
+    --panel-root data/cache/synthetic_panels
 
 # Also re-generate the post-2016 CIZ-window synthetic baseline
 python generate_synthetic_results.py --variant post2016_ciz
@@ -191,6 +220,42 @@ python generate_synthetic_results.py --variant post2016_ciz
 streamlit run src/dashboard/app.py
 ```
 
+#### Methodology — stock-level synthetic panels
+
+Each future-2026 panel is drawn from a cross-sectional factor + idio
+model with regime-specific knobs (`src/synthetic/panels.py`):
+
+```
+ret_{i,t} = β_i · mkt_t + Σ_k char_{i,k,t} · style_return_{k,t} + idio_{i,t}
+```
+
+Style returns follow scenario-specific AR(1) paths and the
+characteristics drift slowly so the panel is a realistic, regime-aware
+fixture rather than independent noise. Each scenario tunes the dials:
+
+* **trending** — high AR(1) on style returns (`ρ=+0.75`) + sticky chars,
+  so leadership persists for years.
+* **mean_reversion** — negative AR(1) on style returns (`ρ=-0.55`),
+  faster char turnover; consecutive months flip winners and losers.
+* **rotating_leaders** — every 12 months the per-style premia are
+  permuted, so the "winning" mix of styles rotates.
+* **choppy** — high idiosyncratic vol, near-zero style premia,
+  near-zero persistence.
+* **crisis** — broad correlated drawdown of ~22% at month 30 with a
+  ~9-month decay back to normal; idio dispersion shrinks during the
+  shock month.
+* **factor_rotation** — value + momentum premia flip sign every 18
+  months; quality / size stay flat.
+* **base** — calibrated continuation: modest premia, modest persistence.
+
+The decile portfolios in `outputs/<variant>/portfolio_returns.pkl` and
+each `models/<MODEL>.pkl` are produced by sorting the 800 synthetic
+permnos each month on a per-model signal (`latent + noise`, with the
+noise scale set by a per-model "skill" coefficient). Ensembles and
+deep NNs have a higher skill coefficient (≈0.80) and therefore earn
+wider H-L spreads — exactly the leaderboard pattern observed on real
+data, but produced entirely from synthetic data.
+
 Caveats:
 
 * No real returns are produced; each variant is a deterministic synthetic
@@ -199,7 +264,8 @@ Caveats:
   regime), not just by RNG seed — `future2026_trending` will show
   persistently positive H-L runs while `future2026_choppy` will not.
 * These outputs are for sanity-checking the dashboard and downstream
-  reporting; they must NOT be interpreted as forecasts.
+  reporting under stress regimes; they must NOT be interpreted as
+  forecasts or used to evaluate any real model.
 
 ---
 

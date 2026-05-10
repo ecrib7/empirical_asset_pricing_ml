@@ -12,7 +12,13 @@ Two families of variants are supported:
   * ``post2016_ciz``         — 2017-01-31 .. 2026-03-31 (CIZ-window
     scoring synthetic; same horizon as the real CIZ extension).
   * ``future2026_*``         — 2026-04-30 .. 2036-03-31 (forward
-    post-WRDS scenarios inspired by anticor-trader regimes).
+    post-WRDS scenarios inspired by anticor-trader regimes). For these
+    variants the artifacts are derived from a stock-level synthetic
+    panel (``src/synthetic/panels.py``) so per-model decile returns
+    actually come from sorting 800 synthetic stocks on a synthetic
+    prediction signal — not from a decile-only shortcut. The panels
+    themselves live at ``data/cache/synthetic_panels/<variant>.parquet``
+    (96,000 rows: 120 month-ends × 800 permnos).
 
 Each variant writes the standard artifact set the rest of the project
 already consumes:
@@ -34,9 +40,24 @@ qualitatively distinct dynamics so the dashboard tells the regimes
 apart at a glance (turnover, drawdown, leadership stability,
 factor-tilt sign).
 
+IMPORTANT: nothing here is a real WRDS training run. All artifacts are
+labelled ``synthetic`` in ``metrics.json`` and the per-model pickles —
+they emulate model evaluation outputs for dashboard compatibility but
+must never be presented as real model results.
+
 Run:
+    # Generate panels + outputs for one variant.
     python generate_synthetic_results.py --variant future2026_base
+
+    # Generate panels + outputs for every future2026 variant.
     python generate_synthetic_results.py --variant future2026_all
+
+    # Only (re)generate parquet panels — skip the per-model artifacts.
+    python generate_synthetic_results.py --variant future2026_all --panels-only
+
+    # Build outputs from an already-generated panel without re-generating
+    # the parquet.
+    python generate_synthetic_results.py --variant future2026_base --from-panel
 """
 
 from __future__ import annotations
@@ -61,6 +82,15 @@ try:
         VARIANT_DEFAULTS,
         get_variant_config,
     )
+    from src.synthetic.panels import (
+        REQUIRED_COLUMNS as PANEL_REQUIRED_COLUMNS,
+        decile_returns_from_panel,
+        generate_panel,
+        load_panel,
+        panel_path,
+        write_panel,
+    )
+    _PANELS_AVAILABLE = True
 except Exception:  # pragma: no cover - defensive
     # Allow execution from arbitrary CWD; fall back to literals.
     FUTURE2026_START = "2026-04-30"
@@ -80,6 +110,8 @@ except Exception:  # pragma: no cover - defensive
         if name not in VARIANT_DEFAULTS:
             raise ValueError(f"Unknown variant {name!r}")
         return dict(VARIANT_DEFAULTS[name])
+
+    _PANELS_AVAILABLE = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -414,6 +446,48 @@ def _build_model_pickle(
     }
 
 
+def _build_model_pickle_from_panel(
+    variant: str,
+    scenario: str,
+    model: str,
+    panel: pd.DataFrame,
+    rng: np.random.Generator,
+    portfolio_returns: Dict[str, pd.Series],
+    portfolio_returns_gross: Dict[str, pd.Series],
+    portfolio_turnover: Dict[str, pd.Series],
+    tc_bps: float,
+) -> dict:
+    """Build the per-model dict from a stock-level panel.
+
+    Predictions, true returns, dates and permnos are sliced from the
+    panel rather than randomly drawn — this is the path that satisfies
+    requirement #4 (model artefacts emulate model evaluation from the
+    underlying synthetic stock-level series).
+    """
+    predictions, true_returns, test_dates, test_permnos = _panel_predictions_for_model(
+        panel, model, rng
+    )
+    oos_r2 = _model_oos_r2_pct(scenario, model, rng)
+    return {
+        "predictions": predictions,
+        "true_returns": true_returns,
+        "test_dates": test_dates,
+        "test_permnos": list(test_permnos),
+        "portfolio_returns": portfolio_returns,
+        "portfolio_returns_gross": portfolio_returns_gross,
+        "portfolio_turnover": portfolio_turnover,
+        "metrics": _model_metrics(
+            model, portfolio_returns, portfolio_returns_gross,
+            portfolio_turnover, oos_r2, tc_bps,
+        ),
+        "variant": variant,
+        "synthetic": True,
+        "source": "synthetic_panel",
+        "panel_path": str(panel_path(variant)) if _PANELS_AVAILABLE else None,
+        "n_stocks_per_month": int(panel["permno"].nunique()),
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Aggregate artifacts
 # ─────────────────────────────────────────────────────────────────────────────
@@ -512,16 +586,205 @@ def _resolve_dates(variant: str) -> Tuple[pd.DatetimeIndex, str]:
     raise ValueError(f"Unsupported variant for synthetic generation: {variant!r}")
 
 
+def _stable_seed(*parts: object) -> int:
+    """Deterministic, process-independent seed derived from ``parts``.
+
+    ``hash()`` is randomized per Python process when PYTHONHASHSEED is
+    not set, which makes re-runs non-reproducible — so we hash a UTF-8
+    string with ``zlib.crc32`` instead.
+    """
+    import zlib
+    blob = "::".join(str(p) for p in parts).encode("utf-8")
+    return int(zlib.crc32(blob)) & 0x7FFFFFFF
+
+
 def _variant_seed(variant: str) -> int:
     """Deterministic seed per variant so re-runs are reproducible."""
-    return abs(hash(variant)) % (2 ** 31)
+    return _stable_seed("variant", variant)
 
 
-def generate_variant(variant: str, out_root: Path | None = None) -> Path:
-    """Write the full artifact set for ``variant`` and return its dir."""
+def _load_or_create_panel(
+    variant: str,
+    *,
+    panel: pd.DataFrame | None,
+    panel_root: Path | None,
+    generate_if_missing: bool,
+) -> pd.DataFrame:
+    """Resolve the stock-level synthetic panel for a future2026 variant."""
+    if panel is not None:
+        return panel
+    parquet = (
+        (Path(panel_root) / f"{variant}.parquet")
+        if panel_root is not None
+        else panel_path(variant)
+    )
+    if parquet.exists():
+        return load_panel(variant, in_path=parquet)
+    if not generate_if_missing:
+        raise FileNotFoundError(
+            f"Panel parquet not found at {parquet}; "
+            "pass --panels-only first or generate it in-memory."
+        )
+    df = generate_panel(variant)
+    parquet.parent.mkdir(parents=True, exist_ok=True)
+    write_panel(variant, df, out_path=parquet)
+    return df
+
+
+def resolve_panel_path(variant: str) -> Path:
+    """Repo-relative parquet path for a future2026 variant's panel."""
+    if not _PANELS_AVAILABLE:
+        raise RuntimeError(
+            "src.synthetic.panels could not be imported; cannot resolve panel path."
+        )
+    return panel_path(variant)
+
+
+def generate_panel_for_variant(
+    variant: str,
+    panel_root: Path | None = None,
+    *,
+    overwrite: bool = True,
+) -> Path:
+    """Generate the stock-level parquet panel for one future2026 variant.
+
+    Writes ``<panel_root>/<variant>.parquet``. Skips regeneration if
+    ``overwrite=False`` and the file already exists.
+
+    Raises if called for a non-future2026 variant.
+    """
+    if not _PANELS_AVAILABLE:
+        raise RuntimeError(
+            "src.synthetic.panels could not be imported; cannot generate panels."
+        )
+    if variant not in FUTURE2026_SCENARIOS:
+        raise ValueError(
+            f"generate_panel_for_variant only supports future2026_* variants; got {variant!r}"
+        )
+    out_path = (
+        (Path(panel_root) / f"{variant}.parquet")
+        if panel_root is not None
+        else panel_path(variant)
+    )
+    if out_path.exists() and not overwrite:
+        return out_path
+    df = generate_panel(variant)
+    return write_panel(variant, df, out_path=out_path)
+
+
+_MODEL_SKILL: Dict[str, float] = {
+    # rank correlation with latent_expected_ret used when sorting + when
+    # producing per-model predictions. Strongest -> ensembles; weakest
+    # -> simple linear / shrinkage baselines.
+    "OLS-3":   0.55,
+    "ENet+H":  0.50,
+    "GLM+H":   0.52,
+    "PCR":     0.62,
+    "PLS":     0.60,
+    "GBRT+H":  0.72,
+    "NN1":     0.65,
+    "NN2":     0.68,
+    "NN3":     0.74,
+    "NN4":     0.72,
+    "ENS-AVG": 0.80,
+    "ENS-MSE": 0.82,
+}
+
+
+def _model_skill(model: str) -> float:
+    return float(_MODEL_SKILL.get(model, 0.55))
+
+
+def _model_signal_array(
+    panel: pd.DataFrame, model: str, rng: np.random.Generator,
+) -> np.ndarray:
+    """Per-model synthetic signal = correlated mix of latent + noise.
+
+    The mix weight is the model's "skill" — ensembles correlate ~0.80
+    with the latent expected return, simple baselines ~0.55. This makes
+    every per-model decile sort inherit the underlying regime dynamics
+    while still preserving a leaderboard.
+    """
+    latent = panel["latent_expected_ret"].to_numpy(dtype=np.float64)
+    z = (latent - latent.mean()) / (latent.std() + 1e-9)
+    rho = _model_skill(model)
+    noise = rng.standard_normal(size=z.shape)
+    return rho * z + float(np.sqrt(max(1.0 - rho ** 2, 0.0))) * noise
+
+
+def _panel_predictions_for_model(
+    panel: pd.DataFrame, model: str, rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per-model synthetic predictions + true returns sliced from the panel.
+
+    Returns (predictions, true_returns, test_dates, test_permnos) flattened
+    in panel row order. Uses a deterministic per-(scenario, model) seed
+    for the signal generation so the predictions align with the deciles.
+    """
+    scenario = (
+        str(panel["scenario"].iloc[0])
+        if "scenario" in panel.columns and len(panel)
+        else "unknown"
+    )
+    seed = _stable_seed("model_signal", scenario, model)
+    local_rng = np.random.default_rng(seed)
+    sig = _model_signal_array(panel, model, local_rng)
+    # Bring back to roughly return scale.
+    predictions = (sig * 0.01).astype(np.float32)
+    true_returns = panel["ret"].to_numpy(dtype=np.float32)
+    test_dates = pd.DatetimeIndex(panel["date"].values)
+    test_permnos = panel["permno"].to_numpy()
+    return predictions, true_returns, test_dates, test_permnos
+
+
+def _decile_returns_from_panel_for_model(
+    panel: pd.DataFrame, model: str, rng: np.random.Generator | None = None,
+) -> Dict[str, pd.Series]:
+    """Per-model decile sort. Stronger-skill models earn wider H-L spreads.
+
+    Uses a deterministic per-(scenario, model) seed for the signal so
+    decile outputs are reproducible regardless of caller-side RNG state.
+    """
+    scenario = (
+        str(panel["scenario"].iloc[0])
+        if "scenario" in panel.columns and len(panel)
+        else "unknown"
+    )
+    seed = _stable_seed("model_signal", scenario, model)
+    local_rng = np.random.default_rng(seed)
+    sig = _model_signal_array(panel, model, local_rng)
+    work = panel[["date", "permno", "ret"]].copy()
+    work["__signal__"] = sig
+    decile_map = decile_returns_from_panel(work, signal_col="__signal__")
+    return {k: v.copy() for k, v in decile_map.items()}
+
+
+def generate_variant(
+    variant: str,
+    out_root: Path | None = None,
+    *,
+    panel_root: Path | None = None,
+    panel: pd.DataFrame | None = None,
+    use_panel: bool | None = None,
+    generate_panel_if_missing: bool = True,
+) -> Path:
+    """Write the full artifact set for ``variant`` and return its dir.
+
+    For ``future2026_*`` variants, decile/H-L returns are derived from a
+    stock-level synthetic panel:
+
+      * If ``panel`` is provided, it's used directly.
+      * Else if a parquet exists at ``panel_root/<variant>.parquet``
+        (default ``data/cache/synthetic_panels/<variant>.parquet``),
+        the panel is loaded from disk.
+      * Else, when ``generate_panel_if_missing`` is true, the panel is
+        generated in-memory and persisted to that path before deriving
+        outputs from it.
+
+    For ``post2016_ciz``, the legacy decile-only path is used (no panel).
+    """
     out_root = out_root or Path("outputs")
     dates, scenario = _resolve_dates(variant)
-    expected = 120 if variant != "post2016_ciz" else 111
     if variant in FUTURE2026_SCENARIOS:
         assert len(dates) == 120, (
             f"future2026 expects 120 month-ends (got {len(dates)}); "
@@ -533,23 +796,39 @@ def generate_variant(variant: str, out_root: Path | None = None) -> Path:
     p = _scenario_params(scenario)
     tc_bps = float(p["tc_bps"])
 
-    # 1) Single gross decile-return matrix shared across models (so all
-    #    models trade the same synthetic universe); per-model variation
-    #    is injected through the prediction array, R², and a small
-    #    return-Sharpe rescale.
-    gross_decile = _decile_returns_for_scenario(scenario, dates, rng)
+    if use_panel is None:
+        use_panel = variant in FUTURE2026_SCENARIOS and _PANELS_AVAILABLE
 
-    # Per-model variants: nudge mean / vol slightly so leaderboards
-    # differ. The H-L spread is rebuilt from the rescaled deciles for
-    # internal consistency.
+    # 1) Per-model decile/H-L returns.
+    #    future2026_* variants derive these from a stock-level panel (so
+    #    decile portfolios actually trade on the underlying synthetic
+    #    universe). post2016_ciz keeps the legacy decile-only path.
+    panel_used: pd.DataFrame | None = None
+    if use_panel and variant in FUTURE2026_SCENARIOS:
+        panel_used = _load_or_create_panel(
+            variant, panel=panel, panel_root=panel_root,
+            generate_if_missing=generate_panel_if_missing,
+        )
+        gross_decile = _decile_returns_from_panel_for_model(panel_used, model="ENS-AVG", rng=rng)
+    else:
+        gross_decile = _decile_returns_for_scenario(scenario, dates, rng)
+
+    # Per-model variants: each model uses its own signal column for the
+    # cross-sectional sort (so different model "skill" levels translate
+    # into different decile spreads), plus a small per-model rescale so
+    # leaderboards still differ row-to-row.
     portfolio_returns_gross: Dict[str, Dict[str, pd.Series]] = {}
     portfolio_returns_net: Dict[str, Dict[str, pd.Series]] = {}
     portfolio_turnover: Dict[str, Dict[str, pd.Series]] = {}
     for m in MODELS:
         scale = float(np.clip(rng.normal(1.0, 0.10), 0.7, 1.4))
         bias = float(np.clip(rng.normal(0.0, 0.0015), -0.004, 0.004))
+        if panel_used is not None:
+            decile_base = _decile_returns_from_panel_for_model(panel_used, model=m, rng=rng)
+        else:
+            decile_base = gross_decile
         per_model_gross: Dict[str, pd.Series] = {}
-        for k, s in gross_decile.items():
+        for k, s in decile_base.items():
             if k == "H-L":
                 continue
             per_model_gross[k] = (s * scale + bias).rename(k)
@@ -572,15 +851,24 @@ def generate_variant(variant: str, out_root: Path | None = None) -> Path:
 
     for m in MODELS:
         oos_r2 = _model_oos_r2_pct(scenario, m, rng)
-        pkl = _build_model_pickle(
-            variant, scenario, m, dates,
-            n_per_month=200,  # 200 synthetic permnos / month -> 24k rows
-            rng=rng,
-            portfolio_returns=portfolio_returns_net[m],
-            portfolio_returns_gross=portfolio_returns_gross[m],
-            portfolio_turnover=portfolio_turnover[m],
-            tc_bps=tc_bps,
-        )
+        if panel_used is not None:
+            pkl = _build_model_pickle_from_panel(
+                variant, scenario, m, panel_used, rng=rng,
+                portfolio_returns=portfolio_returns_net[m],
+                portfolio_returns_gross=portfolio_returns_gross[m],
+                portfolio_turnover=portfolio_turnover[m],
+                tc_bps=tc_bps,
+            )
+        else:
+            pkl = _build_model_pickle(
+                variant, scenario, m, dates,
+                n_per_month=200,  # 200 synthetic permnos / month -> 24k rows
+                rng=rng,
+                portfolio_returns=portfolio_returns_net[m],
+                portfolio_returns_gross=portfolio_returns_gross[m],
+                portfolio_turnover=portfolio_turnover[m],
+                tc_bps=tc_bps,
+            )
         # Pin oos_r2 (the same value flows into metrics + comprehensive).
         pkl["metrics"]["oos_r2_pct"] = round(float(oos_r2), 6)
         with open(models_dir / f"{m}.pkl", "wb") as f:
@@ -603,6 +891,18 @@ def generate_variant(variant: str, out_root: Path | None = None) -> Path:
         cfg = get_variant_config(variant)
     except Exception:
         cfg = {}
+    panel_meta: Dict[str, object] = {}
+    if panel_used is not None:
+        panel_meta = {
+            "panel_source": "synthetic_stock_level",
+            "panel_path": str(panel_path(variant)) if _PANELS_AVAILABLE else None,
+            "n_stocks": int(panel_used["permno"].nunique()),
+            "n_rows": int(len(panel_used)),
+            "panel_start": str(pd.Timestamp(panel_used["date"].min()).date()),
+            "panel_end": str(pd.Timestamp(panel_used["date"].max()).date()),
+            "training_kind": "synthetic_training",
+            "evaluation_kind": "synthetic_evaluation",
+        }
     metrics_payload["_reporting"] = {
         "variant": variant,
         "scenario": scenario,
@@ -614,6 +914,7 @@ def generate_variant(variant: str, out_root: Path | None = None) -> Path:
         "n_months": int(len(dates)),
         "engine_tc_bps": float(tc_bps),
         "source": "generate_synthetic_results.py",
+        **panel_meta,
     }
 
     # 4) Flat artifacts.
@@ -670,12 +971,37 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         default="outputs",
         help="Root directory where outputs/<variant>/ will be written.",
     )
+    parser.add_argument(
+        "--panel-root",
+        default=None,
+        help=(
+            "Directory for stock-level synthetic panel parquets. "
+            "Defaults to 'data/cache/synthetic_panels/'."
+        ),
+    )
+    parser.add_argument(
+        "--panels-only",
+        action="store_true",
+        help=(
+            "Generate ONLY the stock-level parquet panels for the "
+            "selected future2026 variant(s); skip artifact generation."
+        ),
+    )
+    parser.add_argument(
+        "--from-panel",
+        action="store_true",
+        help=(
+            "Skip panel regeneration; require an existing parquet at "
+            "--panel-root/<variant>.parquet and derive outputs from it."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: List[str] | None = None) -> int:
     args = parse_args(argv)
     out_root = Path(args.out_root)
+    panel_root = Path(args.panel_root) if args.panel_root else None
 
     variants: List[str]
     if args.variant == "future2026_all":
@@ -683,8 +1009,29 @@ def main(argv: List[str] | None = None) -> int:
     else:
         variants = [args.variant]
 
+    if args.panels_only:
+        if not _PANELS_AVAILABLE:
+            print("[generate_synthetic_results] panels module unavailable", flush=True)
+            return 1
+        for v in variants:
+            if v not in FUTURE2026_SCENARIOS:
+                print(
+                    f"[generate_synthetic_results] --panels-only is "
+                    f"future2026_* only; skipping {v}",
+                    flush=True,
+                )
+                continue
+            path = generate_panel_for_variant(v, panel_root=panel_root)
+            print(f"[generate_synthetic_results] wrote panel {path}")
+        return 0
+
     for v in variants:
-        path = generate_variant(v, out_root=out_root)
+        path = generate_variant(
+            v,
+            out_root=out_root,
+            panel_root=panel_root,
+            generate_panel_if_missing=not args.from_panel,
+        )
         print(f"[generate_synthetic_results] wrote {path}")
 
     return 0

@@ -257,6 +257,11 @@ def _future2026_defaults(name: str) -> dict:
         "model_dir":              f"outputs/{name}/models",
         "feature_cache":          f"data/cache/feature_matrix_{name}.parquet",
         "checkpoint_subdir":      f"backtest_checkpoint_{name}",
+        # Stock-level synthetic panel that backs this variant. See
+        # ``src/synthetic/panels.py`` and ``generate_synthetic_results.py``.
+        # The panel is a 120-month × 800-permno parquet used as the source
+        # of truth for decile portfolio construction.
+        "synthetic_panel_path":   f"data/cache/synthetic_panels/{name}.parquet",
         # No-WRDS / synthetic semantics: every month in the panel is
         # synthetic. No real-data lookup is permitted.
         "real_data_end":          REAL_DATA_END,
