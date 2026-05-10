@@ -110,6 +110,47 @@ streamlit run src/dashboard/app.py
 
 The Colab notebook `notebooks/empirical_asset_pricing_ml.ipynb` drives the same flow with cells for runtime restarts and Drive backups.
 
+### Post-2016 CIZ scoring (Colab, no retrain)
+
+`post2016_ciz` is a lightweight scoring variant. It reuses the per-model
+prediction pickles already produced under `outputs/paper/models/` or
+`outputs/improved/models/` and slices them to the 2017-01 → 2026-03 window.
+Building the full 1957→2026 feature matrix is OOM on a Mac (~3.1M × 432
+allocation), but slicing pickles is cheap, and `--mode data-only` for this
+variant only spans 2015-01-01 → 2026-03-31 (≈11 years), which is tractable
+on a Colab Pro runtime.
+
+```bash
+# 1) Mount Drive and restore your existing pickles from
+#    `/content/drive/MyDrive/Algo Trading Project/outputs_backup`
+#    into ./outputs/ (the notebook does this; or do it manually).
+
+# 2) (Optional but recommended) build a post2016_ciz feature matrix
+#    so the predict step can sanity-check (date, permno) coverage:
+python main.py --mode data-only --variant post2016_ciz --wrds-username YOUR_USER
+
+# 3) Slice pickles from a source variant into outputs/post2016_ciz/models/.
+#    Pick `improved` (covers 1987–2024) for the widest post-2016 overlap.
+python main.py --mode predict --variant post2016_ciz \
+    --source-model-variant improved \
+    --models OLS-3 ENet+H PCR PLS GLM+H GBRT+H NN1 NN2 NN3 NN4
+
+# 4) Run the standard evaluate / regimes / dashboard on the sliced output.
+python main.py --mode evaluate --variant post2016_ciz
+python main.py --mode regimes  --variant post2016_ciz
+```
+
+Caveats:
+
+* Per-model pickles store **predictions**, not fitted model objects. So
+  `--mode predict` cannot generate predictions for dates beyond the source
+  variant's `test_end` (paper → 2016-11, improved → 2024-11). For
+  2025-01 → 2026-03 you must retrain with `--variant extended_ciz_2026`.
+* Feature-column compatibility is therefore a non-issue here: we are
+  slicing existing predictions, not re-scoring rows against a new feature
+  matrix.
+* If you pass a `--models` subset, the slicing only emits those names.
+
 ---
 
 ## Setup

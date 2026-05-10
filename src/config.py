@@ -174,6 +174,43 @@ VARIANT_DEFAULTS = {
         "synthetic_start":        SYNTHETIC_START,
         "synthetic_enabled":      False,
     },
+    # ─────────────────────────────────────────────────────────────
+    # post2016_ciz — *extension/scoring* variant intended to reuse
+    # existing trained-model pickles (paper or improved) over the
+    # post-2016 out-of-sample window without re-running the full
+    # 1957→2026 backtest. The data_start is shifted to 2015-01-01
+    # so the 12-month / rolling characteristics have one full year
+    # of warmup before test_start. It is NOT a full retrain — see
+    # ``run_predict`` in main.py.
+    # ─────────────────────────────────────────────────────────────
+    "post2016_ciz": {
+        "data_start":   "2015-01-01",  # 12m warmup before test_start
+        "data_end":     "2026-03-31",
+        # train_start / val_* kept for compatibility with code that
+        # expects them, but training is NOT run for this variant.
+        "train_start":  "2015-01-01",
+        "val_start":    "2016-01-01",
+        "val_end":      "2016-12-31",
+        "test_start":   "2017-01-01",
+        "test_end":     "2026-03-31",
+        "use_macro_interactions": True,
+        "use_industry_dummies":   True,
+        "tc_bps":                 10.0,
+        "tc_model":               "stock_level",
+        "tc_vol_spread_bps":      8.0,
+        "tc_vol_impact_scale":    0.4,
+        "tc_nav_billions":        1.0,
+        "output_dir":             "outputs/post2016_ciz",
+        "model_dir":              "outputs/post2016_ciz/models",
+        "feature_cache":          "data/cache/feature_matrix_post2016_ciz.parquet",
+        "checkpoint_subdir":      "backtest_checkpoint_post2016_ciz",
+        "real_data_end":          REAL_DATA_END,
+        "synthetic_start":        SYNTHETIC_START,
+        "synthetic_enabled":      False,
+        # Marker: this variant is intended for `--mode predict`,
+        # not `--mode train`. main.py reads this flag for guard logic.
+        "is_scoring_variant":     True,
+    },
 }
 
 

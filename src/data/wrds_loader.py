@@ -110,7 +110,7 @@ _CIZ_REQUIRED_COLUMNS: frozenset[str] = frozenset(
 
 # Variants whose data_end exceeds LEGACY_REAL_DATA_END (2024-12-31) require
 # a CIZ-aware loader. Anything else stays on legacy crsp.msf.
-CIZ_AWARE_VARIANTS: frozenset[str] = frozenset({"extended_ciz_2026"})
+CIZ_AWARE_VARIANTS: frozenset[str] = frozenset({"extended_ciz_2026", "post2016_ciz"})
 
 # CIZ source preference: furthest endpoint first (matches
 # scripts/check_wrds_coverage.py::_CIZ_PREFERENCE).

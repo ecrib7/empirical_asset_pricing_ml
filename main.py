@@ -35,6 +35,7 @@ import logging
 import os
 import pickle
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -879,6 +880,236 @@ def _run_backtest(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Predict mode — reuse existing per-model prediction pickles from a source
+#  variant ('paper' / 'improved' / ...) over the target variant's test window.
+#  No training is performed.
+#
+#  Design note: per-model pickles in outputs/<v>/models/<m>.pkl carry the raw
+#  prediction *arrays* — not fitted model objects. So "scoring fresh rows from
+#  a new feature matrix" is not possible without retraining. What is possible
+#  and useful is to slice the source variant's existing predictions to the
+#  target variant's [test_start, test_end] window and re-emit them in the
+#  same per-model format under outputs/<target>/models/, so that the existing
+#  --mode evaluate / regimes / dashboard tooling Just Works.
+#
+#  The target variant's feature matrix is optional here — if present, it is
+#  used only to confirm that the (date, permno) pairs in the sliced
+#  predictions still exist in the new universe (a sanity check, not a
+#  re-score). This sidesteps the CIZ-vs-legacy feature-column compatibility
+#  problem entirely.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _slice_pickle_to_window(
+    src_pkl: dict, test_start: pd.Timestamp, test_end: pd.Timestamp,
+) -> Optional[dict]:
+    """Return a new per-model dict whose arrays are restricted to dates in
+    [test_start, test_end]. Returns None if no rows survive the slice."""
+    import numpy as np
+    dates = pd.DatetimeIndex(src_pkl["test_dates"])
+    mask = (dates >= test_start) & (dates <= test_end)
+    n_keep = int(mask.sum())
+    if n_keep == 0:
+        return None
+    pred = np.asarray(src_pkl["predictions"])[mask]
+    truth = np.asarray(src_pkl["true_returns"])[mask]
+    sliced_dates = dates[mask]
+    permnos = src_pkl.get("test_permnos")
+    if permnos is not None:
+        permnos = list(np.asarray(permnos)[mask])
+
+    def _filter_pf(pf):
+        if not isinstance(pf, dict):
+            return pf
+        out = {}
+        for k, v in pf.items():
+            try:
+                if hasattr(v, "loc"):
+                    s = v.loc[(v.index >= test_start) & (v.index <= test_end)]
+                    out[k] = s
+                else:
+                    out[k] = v
+            except Exception:
+                out[k] = v
+        return out
+
+    return {
+        "predictions":             pred,
+        "true_returns":            truth,
+        "test_dates":              sliced_dates,
+        "test_permnos":            permnos,
+        "portfolio_returns":       _filter_pf(src_pkl.get("portfolio_returns", {})),
+        "portfolio_returns_gross": _filter_pf(src_pkl.get("portfolio_returns_gross", {})),
+        "portfolio_turnover":      _filter_pf(src_pkl.get("portfolio_turnover", {})),
+        "metrics":                 dict(src_pkl.get("metrics", {})),
+        "variant":                 src_pkl.get("variant", "unknown"),
+        "_source_pickle_variant":  src_pkl.get("variant", "unknown"),
+        "_sliced_to":              {"test_start": str(test_start.date()),
+                                    "test_end":   str(test_end.date())},
+    }
+
+
+def run_predict(args) -> dict:
+    """
+    Reuse pickles from ``--source-model-variant`` for the target variant's
+    test window. Writes outputs/<target>/models/<m>.pkl so that downstream
+    `--mode evaluate` can build comprehensive tables without retraining.
+
+    Caveats (logged at runtime):
+      * If the source pickles do not span the full [test_start, test_end]
+        window, only the overlapping subset is emitted.
+      * No new predictions are generated for dates outside the source
+        coverage. The user is warned explicitly.
+      * Feature-column compatibility is NOT checked because we are slicing
+        existing predictions, not re-scoring. This is intentional.
+    """
+    cfg = _resolve_variant(args)
+    src_name = getattr(args, "source_model_variant", None)
+    if not src_name:
+        raise ValueError(
+            "--mode predict requires --source-model-variant "
+            "(one of: paper, improved, extended_2024, extended_ciz_2026)."
+        )
+    if src_name == cfg["name"]:
+        raise ValueError(
+            f"--source-model-variant cannot equal --variant ({src_name}). "
+            "Choose a different source whose pickles already exist."
+        )
+
+    src_cfg = get_variant_config(src_name)
+    src_model_dir = Path(src_cfg["model_dir"])
+    if not src_model_dir.exists():
+        raise FileNotFoundError(
+            f"Source model dir not found: {src_model_dir}. "
+            f"Have the {src_name!r} variant pickles been restored from Drive?"
+        )
+    src_pkls = sorted(src_model_dir.glob("*.pkl"))
+    if not src_pkls:
+        raise FileNotFoundError(
+            f"No model pickles in {src_model_dir}. Restore them from Drive "
+            f"or run `--mode train --variant {src_name}` first."
+        )
+
+    requested = set(getattr(args, "models", None) or [])
+    if requested:
+        src_pkls = [p for p in src_pkls if p.stem in requested]
+        if not src_pkls:
+            raise ValueError(
+                f"None of the requested models {sorted(requested)} were "
+                f"found in {src_model_dir}. Available: "
+                f"{[p.stem for p in sorted(src_model_dir.glob('*.pkl'))]}"
+            )
+
+    test_start = pd.Timestamp(cfg["test_start"])
+    test_end   = pd.Timestamp(cfg["test_end"])
+    dst_model_dir = Path(cfg["model_dir"])
+    dst_model_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(
+        f"=== Predict mode: slicing pickles from variant={src_name!r} "
+        f"into variant={cfg['name']!r} test window "
+        f"[{test_start.date()} .. {test_end.date()}] ==="
+    )
+    logger.info(
+        "Note: per-model pickles store predictions, not fitted model objects. "
+        "This mode reuses already-produced predictions and does NOT re-score "
+        "rows from the target feature matrix. To get predictions strictly "
+        "after the source variant's test_end you must retrain."
+    )
+
+    feature_matrix_path = _feature_matrix_path(cfg)
+    fm_keys = None
+    if feature_matrix_path.exists():
+        try:
+            fm = pd.read_parquet(feature_matrix_path, columns=["date", "permno"])
+            fm["date"] = pd.to_datetime(fm["date"])
+            fm = fm[(fm["date"] >= test_start) & (fm["date"] <= test_end)]
+            fm_keys = set(zip(fm["date"].astype("int64"), fm["permno"]))
+            logger.info(
+                f"Target feature matrix found ({feature_matrix_path}); "
+                f"{len(fm_keys):,} (date, permno) pairs in test window will "
+                f"be used as a sanity-check filter."
+            )
+        except Exception as e:
+            logger.warning(f"Could not read target feature matrix for "
+                           f"coverage check: {e}. Skipping coverage filter.")
+            fm_keys = None
+    else:
+        logger.info(
+            f"No target feature matrix at {feature_matrix_path}. "
+            "Proceeding without coverage cross-check; you should still run "
+            "`--mode data-only --variant post2016_ciz` before backtest/regimes "
+            "if you want a populated universe in subsequent stages."
+        )
+
+    written = []
+    skipped: list[tuple[str, str]] = []
+    for p in src_pkls:
+        with open(p, "rb") as f:
+            src = pickle.load(f)
+        sliced = _slice_pickle_to_window(src, test_start, test_end)
+        if sliced is None:
+            skipped.append((p.stem, "no rows in target window"))
+            logger.warning(
+                f"[{p.stem}] source pickle has no rows in "
+                f"[{test_start.date()}..{test_end.date()}] — skipping."
+            )
+            continue
+
+        src_dates = pd.DatetimeIndex(src["test_dates"])
+        src_max = src_dates.max()
+        if src_max < test_end:
+            logger.warning(
+                f"[{p.stem}] source predictions end at {src_max.date()} but "
+                f"target test_end is {test_end.date()} — emitted slice covers "
+                f"only [{sliced['test_dates'].min().date()} .. "
+                f"{sliced['test_dates'].max().date()}]. The remaining tail "
+                "will be missing from --mode evaluate output."
+            )
+
+        if fm_keys is not None and len(fm_keys) > 0:
+            import numpy as _np
+            sd = pd.DatetimeIndex(sliced["test_dates"]).astype("int64")
+            sp = _np.asarray(sliced["test_permnos"])
+            keep = _np.fromiter(
+                (((d, pn) in fm_keys) for d, pn in zip(sd, sp)),
+                dtype=bool, count=len(sd),
+            )
+            n_drop = int((~keep).sum())
+            if n_drop > 0:
+                logger.warning(
+                    f"[{p.stem}] {n_drop:,}/{len(keep):,} sliced rows are not "
+                    "in the target feature matrix universe; they will be "
+                    "kept in the pickle but flagged in metadata."
+                )
+                sliced["_coverage_drop_count"] = n_drop
+                sliced["_coverage_kept_count"] = int(keep.sum())
+
+        out = dst_model_dir / p.name
+        with open(out, "wb") as f:
+            pickle.dump(sliced, f)
+        written.append(p.stem)
+        logger.info(
+            f"[{p.stem}] wrote {out} "
+            f"(n={len(sliced['predictions']):,}, "
+            f"{sliced['test_dates'].min().date()} → "
+            f"{sliced['test_dates'].max().date()})"
+        )
+
+    logger.info(
+        f"=== Predict mode complete. Wrote {len(written)} pickle(s) to "
+        f"{dst_model_dir}: {written}. Skipped: {skipped}. ==="
+    )
+    if written:
+        logger.info(
+            f"Next: `python main.py --mode evaluate --variant {cfg['name']}` "
+            "to build OOS R², Sharpe and comprehensive tables from the "
+            "sliced predictions."
+        )
+    return {"written": written, "skipped": skipped,
+            "source_variant": src_name, "target_variant": cfg["name"]}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Importance mode — fit each model on train+val and compute variable
 #  importance on a test slice, save per-variant CSVs.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1103,7 +1334,8 @@ def parse_args():
     )
     parser.add_argument(
         "--variant",
-        choices=["paper", "improved", "extended_2024", "extended_ciz_2026"],
+        choices=["paper", "improved", "extended_2024",
+                 "extended_ciz_2026", "post2016_ciz"],
         default="paper",
         help=(
             "Which pipeline to run. "
@@ -1113,7 +1345,11 @@ def parse_args():
             "crsp.msf (2024-12-31). "
             "'extended_ciz_2026' = CIZ/v2-aware extension to 2026-03-31 using "
             "the crsp_q_stock.* monthly tables (legacy schema preserved via "
-            "column mapping). Macro interactions are on in all variants. "
+            "column mapping). "
+            "'post2016_ciz' = CIZ-aware *scoring* variant (2017-01..2026-03) "
+            "intended for --mode predict to reuse pickles from 'paper' or "
+            "'improved' over the post-2016 OOS window without retraining. "
+            "Macro interactions are on in all variants. "
             "Each variant writes to its own outputs/<variant>/ directory and "
             "uses its own cached feature matrix, so the pipelines do not "
             "overwrite each other."
@@ -1123,7 +1359,7 @@ def parse_args():
         "--mode",
         choices=["full", "test", "cache", "dashboard",
                  "data-only", "train", "evaluate", "importance",
-                 "regimes"],
+                 "regimes", "predict"],
         default="test",
         help=(
             "'full' = WRDS + train + evaluate in one shot; "
@@ -1132,6 +1368,9 @@ def parse_args():
             "'evaluate' = merge per-model .pkl into final tables (incl. ENS-AVG, ENS-MSE); "
             "'importance' = compute variable importance for trained models; "
             "'regimes' = regime-conditional evaluation (NBER, VIX, decades); "
+            "'predict' = reuse existing per-model prediction pickles from "
+            "another variant (--source-model-variant) over the target "
+            "variant's test window — no training required; "
             "'test' = synthetic data; 'cache' = reuse feature matrix; "
             "'dashboard' = launch Streamlit"
         ),
@@ -1188,6 +1427,15 @@ def parse_args():
                         default=None,
                         help="End date of the train+val window used to fit models for "
                              "variable importance (default: variant's val_end).")
+    parser.add_argument(
+        "--source-model-variant",
+        choices=["paper", "improved", "extended_2024", "extended_ciz_2026"],
+        default=None,
+        help="Used by --mode predict. Source variant whose per-model pickles "
+             "in outputs/<source>/models/ should be sliced into the target "
+             "variant's test window. 'improved' is the recommended source for "
+             "post2016_ciz since its pickles cover 1987-2024.",
+    )
     return parser.parse_args()
 
 
@@ -1219,6 +1467,8 @@ def main():
         results = run_importance(args)
     elif args.mode == "regimes":
         results = run_regimes(args)
+    elif args.mode == "predict":
+        results = run_predict(args)
     elif args.mode == "dashboard":
         import subprocess, sys
         subprocess.run([sys.executable, "-m", "streamlit", "run",
