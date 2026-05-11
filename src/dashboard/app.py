@@ -156,11 +156,31 @@ st.sidebar.title("GKX (2019) Replication")
 st.sidebar.markdown("**IEOR 4733 — Algorithmic Trading**")
 st.sidebar.markdown("---")
 
-# Variant selector — drives every loader on the page
-available_variants = []
-for v in ("paper", "improved"):
-    if (ROOT / "outputs" / v / "metrics.json").exists():
-        available_variants.append(v)
+# Variant selector — drives every loader on the page.
+# Discover any outputs/<sub>/ directory that has a metrics.json; ensure
+# the canonical real variants ('paper', 'improved') and the synthetic
+# scoring / future variants are listed even if not yet generated, so the
+# Run Pipeline tab still surfaces them.
+_KNOWN_VARIANTS = (
+    "paper", "improved", "extended_2024", "extended_ciz_2026",
+    "post2016_ciz",
+    "future2026_base", "future2026_trending", "future2026_mean_reversion",
+    "future2026_rotating_leaders", "future2026_choppy",
+    "future2026_crisis", "future2026_factor_rotation",
+)
+
+discovered = []
+outputs_root = ROOT / "outputs"
+if outputs_root.exists():
+    for sub in sorted(outputs_root.iterdir()):
+        if sub.is_dir() and (sub / "metrics.json").exists():
+            discovered.append(sub.name)
+
+# Stable ordering: known variants first (in canonical order), then any
+# extras that appeared on disk.
+available_variants = [v for v in _KNOWN_VARIANTS if v in discovered]
+available_variants += [v for v in discovered if v not in _KNOWN_VARIANTS]
+
 if not available_variants and (ROOT / "outputs" / "metrics.json").exists():
     available_variants = ["paper"]
 
@@ -175,7 +195,10 @@ variant = st.sidebar.selectbox(
     "Pipeline variant",
     available_variants,
     help=("'paper' = strict GKX 1957–2016 reproduction (TC=0). "
-          "'improved' = extended sample to 2024 + transaction costs modelled."),
+          "'improved' = extended sample to 2024 + transaction costs modelled. "
+          "'post2016_ciz' = synthetic CIZ-window scoring (2017–2026). "
+          "'future2026_*' = forward synthetic post-WRDS scenarios "
+          "(2026-04..2036-03)."),
 )
 st.sidebar.markdown(f"📁 `outputs/{variant}/`")
 st.sidebar.markdown("---")

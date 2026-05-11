@@ -1335,7 +1335,11 @@ def parse_args():
     parser.add_argument(
         "--variant",
         choices=["paper", "improved", "extended_2024",
-                 "extended_ciz_2026", "post2016_ciz"],
+                 "extended_ciz_2026", "post2016_ciz",
+                 "future2026_base", "future2026_trending",
+                 "future2026_mean_reversion", "future2026_rotating_leaders",
+                 "future2026_choppy", "future2026_crisis",
+                 "future2026_factor_rotation"],
         default="paper",
         help=(
             "Which pipeline to run. "

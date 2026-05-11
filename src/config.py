@@ -214,6 +214,69 @@ VARIANT_DEFAULTS = {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  future2026 — fully synthetic post-WRDS scenarios (2026-04-30..2036-03-31).
+#  These variants do not consume WRDS data. They are produced by
+#  ``generate_synthetic_results.py`` and emit the standard output artifacts
+#  (models/*.pkl, portfolio_returns.pkl, metrics.json, comprehensive.csv,
+#  oos_r2.csv, sharpe_table.csv, dm_table.csv, dm_pvalues.csv, regimes.csv,
+#  var_importance.csv) so the existing dashboard reads them unchanged.
+#  Scenarios are inspired by the anticor-trader regime taxonomy.
+# ─────────────────────────────────────────────────────────────────────────────
+FUTURE2026_START = "2026-04-30"
+FUTURE2026_END   = "2036-03-31"
+FUTURE2026_SCENARIOS = (
+    "future2026_base",
+    "future2026_trending",
+    "future2026_mean_reversion",
+    "future2026_rotating_leaders",
+    "future2026_choppy",
+    "future2026_crisis",
+    "future2026_factor_rotation",
+)
+
+
+def _future2026_defaults(name: str) -> dict:
+    return {
+        # Synthetic months only: no warmup, no real data.
+        "data_start":   FUTURE2026_START,
+        "data_end":     FUTURE2026_END,
+        "train_start":  FUTURE2026_START,
+        "val_start":    FUTURE2026_START,
+        "val_end":      FUTURE2026_START,
+        "test_start":   FUTURE2026_START,
+        "test_end":     FUTURE2026_END,
+        "use_macro_interactions": True,
+        "use_industry_dummies":   True,
+        "tc_bps":                 10.0,
+        "tc_model":               "stock_level",
+        "tc_vol_spread_bps":      8.0,
+        "tc_vol_impact_scale":    0.4,
+        "tc_nav_billions":        1.0,
+        "output_dir":             f"outputs/{name}",
+        "model_dir":              f"outputs/{name}/models",
+        "feature_cache":          f"data/cache/feature_matrix_{name}.parquet",
+        "checkpoint_subdir":      f"backtest_checkpoint_{name}",
+        # Stock-level synthetic panel that backs this variant. See
+        # ``src/synthetic/panels.py`` and ``generate_synthetic_results.py``.
+        # The panel is a 120-month × 800-permno parquet used as the source
+        # of truth for decile portfolio construction.
+        "synthetic_panel_path":   f"data/cache/synthetic_panels/{name}.parquet",
+        # No-WRDS / synthetic semantics: every month in the panel is
+        # synthetic. No real-data lookup is permitted.
+        "real_data_end":          REAL_DATA_END,
+        "synthetic_start":        FUTURE2026_START,
+        "synthetic_enabled":      True,
+        "is_scoring_variant":     False,
+        "is_synthetic_only":      True,
+        "scenario":               name.replace("future2026_", ""),
+    }
+
+
+for _scn in FUTURE2026_SCENARIOS:
+    VARIANT_DEFAULTS[_scn] = _future2026_defaults(_scn)
+
+
 def get_variant_config(name: str) -> dict:
     """Return a dict of defaults for the named variant ('paper' or 'improved')."""
     if name not in VARIANT_DEFAULTS:

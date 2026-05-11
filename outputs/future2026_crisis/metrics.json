@@ -1,0 +1,118 @@
+{
+  "OLS-3": {
+    "oos_r2_pct": -0.031223,
+    "hl_sharpe": 0.384621,
+    "hl_sharpe_gross": 0.593709,
+    "hl_mean_turnover_one_way": 1.564345,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENet+H": {
+    "oos_r2_pct": 0.009769,
+    "hl_sharpe": 0.13157,
+    "hl_sharpe_gross": 0.34081,
+    "hl_mean_turnover_one_way": 1.546636,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "PCR": {
+    "oos_r2_pct": -0.049796,
+    "hl_sharpe": 0.330745,
+    "hl_sharpe_gross": 0.579299,
+    "hl_mean_turnover_one_way": 1.537676,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "PLS": {
+    "oos_r2_pct": -0.018398,
+    "hl_sharpe": 0.174919,
+    "hl_sharpe_gross": 0.396033,
+    "hl_mean_turnover_one_way": 1.529873,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "GLM+H": {
+    "oos_r2_pct": -0.044692,
+    "hl_sharpe": -0.496636,
+    "hl_sharpe_gross": -0.295795,
+    "hl_mean_turnover_one_way": 1.56858,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "GBRT+H": {
+    "oos_r2_pct": -0.099043,
+    "hl_sharpe": -0.111357,
+    "hl_sharpe_gross": 0.130345,
+    "hl_mean_turnover_one_way": 1.55333,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN1": {
+    "oos_r2_pct": -0.0221,
+    "hl_sharpe": -0.458811,
+    "hl_sharpe_gross": -0.227176,
+    "hl_mean_turnover_one_way": 1.539541,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN2": {
+    "oos_r2_pct": -0.047445,
+    "hl_sharpe": 0.360957,
+    "hl_sharpe_gross": 0.530961,
+    "hl_mean_turnover_one_way": 1.527379,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN3": {
+    "oos_r2_pct": -0.105627,
+    "hl_sharpe": 0.208491,
+    "hl_sharpe_gross": 0.456524,
+    "hl_mean_turnover_one_way": 1.543488,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN4": {
+    "oos_r2_pct": -0.097207,
+    "hl_sharpe": 0.197955,
+    "hl_sharpe_gross": 0.394424,
+    "hl_mean_turnover_one_way": 1.559169,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENS-AVG": {
+    "oos_r2_pct": -0.140251,
+    "hl_sharpe": 0.452311,
+    "hl_sharpe_gross": 0.669738,
+    "hl_mean_turnover_one_way": 1.561625,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENS-MSE": {
+    "oos_r2_pct": -0.080199,
+    "hl_sharpe": 0.699448,
+    "hl_sharpe_gross": 0.930068,
+    "hl_mean_turnover_one_way": 1.536277,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "_reporting": {
+    "variant": "future2026_crisis",
+    "scenario": "crisis",
+    "data_start": "2026-04-30",
+    "data_end": "2036-03-31",
+    "test_start": "2026-04-30",
+    "test_end": "2036-03-31",
+    "synthetic": true,
+    "n_months": 120,
+    "engine_tc_bps": 10.0,
+    "source": "generate_synthetic_results.py",
+    "panel_source": "synthetic_stock_level",
+    "panel_path": "data/cache/synthetic_panels/future2026_crisis.parquet",
+    "n_stocks": 800,
+    "n_rows": 96000,
+    "panel_start": "2026-04-30",
+    "panel_end": "2036-03-31",
+    "training_kind": "synthetic_training",
+    "evaluation_kind": "synthetic_evaluation"
+  }
+}
