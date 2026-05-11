@@ -219,6 +219,127 @@ class TestGenerator:
             assert (tmp_path / v / "metrics.json").exists()
 
 
+@pytest.fixture(scope="module")
+def all_future2026_outputs(tmp_path_factory):
+    """Generate every future2026 variant once per module; share across tests."""
+    out_root = tmp_path_factory.mktemp("future2026_outputs")
+    panel_root = tmp_path_factory.mktemp("future2026_panels")
+    comp_by_variant: dict[str, pd.DataFrame] = {}
+    for variant in FUTURE2026_SCENARIOS:
+        path = gsr.generate_variant(
+            variant, out_root=out_root, panel_root=panel_root,
+        )
+        comp_by_variant[variant] = pd.read_csv(path / "comprehensive.csv")
+    return comp_by_variant
+
+
+class TestOutputPlausibility:
+    """Calibration guardrails: panel-derived outputs must be plausible.
+
+    These do NOT check exact numbers — they check upper/lower bounds and
+    scenario ordering. Tight numeric assertions would break every reseed.
+    """
+
+    SHARPE_HARD_CAP = 3.0  # no future2026 model may exceed this gross-Sharpe
+    SHARPE_NET_HARD_CAP = 3.0
+    SHARPE_LOWER_BOUND = -2.0  # avoid catastrophic mis-calibration sign flips
+
+    def test_no_model_sharpe_above_hard_cap(self, all_future2026_outputs):
+        for variant, comp in all_future2026_outputs.items():
+            max_net = float(comp["Sharpe (net)"].max())
+            max_gross = float(comp["Sharpe (gross)"].max())
+            assert max_net < self.SHARPE_NET_HARD_CAP, (
+                f"{variant}: net Sharpe {max_net:.2f} >= {self.SHARPE_NET_HARD_CAP}"
+            )
+            assert max_gross < self.SHARPE_HARD_CAP, (
+                f"{variant}: gross Sharpe {max_gross:.2f} >= {self.SHARPE_HARD_CAP}"
+            )
+
+    def test_no_model_sharpe_below_lower_bound(self, all_future2026_outputs):
+        for variant, comp in all_future2026_outputs.items():
+            min_net = float(comp["Sharpe (net)"].min())
+            assert min_net > self.SHARPE_LOWER_BOUND, (
+                f"{variant}: net Sharpe {min_net:.2f} <= {self.SHARPE_LOWER_BOUND}"
+            )
+
+    def test_choppy_avg_sharpe_lower_than_trending(self, all_future2026_outputs):
+        choppy = all_future2026_outputs["future2026_choppy"]["Sharpe (net)"].mean()
+        trending = all_future2026_outputs["future2026_trending"]["Sharpe (net)"].mean()
+        assert choppy < trending - 0.3, (choppy, trending)
+
+    def test_crisis_avg_sharpe_lower_than_base(self, all_future2026_outputs):
+        crisis = all_future2026_outputs["future2026_crisis"]["Sharpe (net)"].mean()
+        base = all_future2026_outputs["future2026_base"]["Sharpe (net)"].mean()
+        assert crisis < base, (crisis, base)
+
+    def test_trending_best_model_strongest_overall(self, all_future2026_outputs):
+        # Trending should have the highest "best ensemble" Sharpe among the
+        # major regimes (trending vs choppy vs crisis).
+        best_by_scn = {
+            v: all_future2026_outputs[v]["Sharpe (net)"].max()
+            for v in (
+                "future2026_trending",
+                "future2026_base",
+                "future2026_choppy",
+                "future2026_crisis",
+            )
+        }
+        assert best_by_scn["future2026_trending"] > best_by_scn["future2026_choppy"]
+        assert best_by_scn["future2026_trending"] > best_by_scn["future2026_crisis"]
+
+    def test_at_least_one_scenario_has_meaningful_drawdown(self, all_future2026_outputs):
+        # Across all variants, at least one model's Max DD must exceed 8%.
+        worst_dd_overall = max(
+            float(comp["Max DD (%)"].max())
+            for comp in all_future2026_outputs.values()
+        )
+        assert worst_dd_overall > 8.0, worst_dd_overall
+
+    def test_crisis_drawdown_propagates_to_models(self, all_future2026_outputs):
+        # Crisis should be the (or among the) worst drawdown regimes.
+        crisis_max_dd = float(
+            all_future2026_outputs["future2026_crisis"]["Max DD (%)"].max()
+        )
+        trending_max_dd = float(
+            all_future2026_outputs["future2026_trending"]["Max DD (%)"].max()
+        )
+        assert crisis_max_dd > trending_max_dd, (crisis_max_dd, trending_max_dd)
+        # Crisis worst-model DD must be material (> 8%).
+        assert crisis_max_dd > 8.0, crisis_max_dd
+
+    def test_ensemble_sharpe_not_absurdly_high(self, all_future2026_outputs):
+        # No ENS-* model in any scenario should exceed Sharpe 2.7.
+        for variant, comp in all_future2026_outputs.items():
+            ens_rows = comp[comp["Model"].isin(["ENS-AVG", "ENS-MSE"])]
+            if not len(ens_rows):
+                continue
+            ens_max = float(ens_rows["Sharpe (net)"].max())
+            assert ens_max < 2.7, f"{variant} ENS max Sharpe {ens_max:.2f}"
+
+    def test_no_zero_drawdown_for_weaker_models(self, all_future2026_outputs):
+        # The H-L noise overlay should keep DD non-zero for weak models in
+        # most regimes — otherwise the synthetic is overly optimistic.
+        non_trivial_dd_variants = 0
+        for variant, comp in all_future2026_outputs.items():
+            if float(comp["Max DD (%)"].max()) >= 5.0:
+                non_trivial_dd_variants += 1
+        assert non_trivial_dd_variants >= 5, (
+            f"only {non_trivial_dd_variants}/7 variants have meaningful DD"
+        )
+
+    def test_panel_metrics_schema_preserved(self, all_future2026_outputs):
+        # Schema check: comprehensive.csv must still carry the canonical columns.
+        expected_cols = {
+            "Model", "Sharpe (net)", "Sharpe (gross)", "Max DD (%)",
+            "OOS R² (%)", "Mean TO (1-way)", "Alpha (% / yr)", "t(alpha)",
+        }
+        for variant, comp in all_future2026_outputs.items():
+            missing = expected_cols - set(comp.columns)
+            assert not missing, f"{variant} missing comp columns: {missing}"
+            # Every canonical model must appear.
+            assert set(gsr.MODELS).issubset(set(comp["Model"])), variant
+
+
 class TestArgparseChoices:
     def test_main_argparse_accepts_future_variants(self):
         import main as main_mod

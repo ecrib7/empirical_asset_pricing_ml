@@ -384,24 +384,26 @@ def _model_oos_r2_pct(scenario: str, model: str, rng: np.random.Generator) -> fl
 
     Scaled so ensembles and NNs do best in regimes with structure,
     weakest in choppy/crisis. Sign matches the empirical pattern from
-    the project's improved-variant metrics.
+    the project's improved-variant metrics. Values reflect a plausible
+    monthly cross-sectional OOS R² (≈ 0.2-0.6%) — the bulk of return
+    variance is idio noise that no realistic model captures.
     """
     base = {
-        "OLS-3": 0.012, "ENet+H": 0.008, "GLM+H": 0.009, "PCR": 0.018,
-        "PLS": 0.016, "GBRT+H": 0.030, "NN1": 0.025, "NN2": 0.028,
-        "NN3": 0.032, "NN4": 0.030, "ENS-AVG": 0.035, "ENS-MSE": 0.038,
-    }.get(model, 0.010)
+        "OLS-3": 0.10, "ENet+H": 0.08, "GLM+H": 0.09, "PCR": 0.18,
+        "PLS": 0.16, "GBRT+H": 0.35, "NN1": 0.25, "NN2": 0.28,
+        "NN3": 0.40, "NN4": 0.38, "ENS-AVG": 0.45, "ENS-MSE": 0.50,
+    }.get(model, 0.10)
     regime_mult = {
         "base": 1.00,
-        "trending": 1.25,
+        "trending": 1.30,
         "mean_reversion": 0.65,
-        "rotating_leaders": 0.45,
+        "rotating_leaders": 0.55,
         "choppy": 0.15,
         "crisis": -0.20,
-        "factor_rotation": 0.55,
+        "factor_rotation": 0.65,
         "post2016_ciz": 1.10,
     }.get(scenario, 1.0)
-    noise = rng.normal(0.0, 0.003)
+    noise = rng.normal(0.0, 0.03)
     return float(base * regime_mult + noise)
 
 
@@ -672,27 +674,78 @@ def generate_panel_for_variant(
     return write_panel(variant, df, out_path=out_path)
 
 
+# Per-model BASE skill (correlation with the latent expected return).
+# These are deliberately low: averaging 80 stocks per decile collapses
+# idio noise, so a per-stock signal correlation of even 0.10 produces an
+# H-L Sharpe > 2 after monthly aggregation. The calibration target is
+# plausible model performance (per-scenario avg Sharpe ~0.7-1.5, best
+# ~1.5-2.5), not a finance textbook factor model.
 _MODEL_SKILL: Dict[str, float] = {
-    # rank correlation with latent_expected_ret used when sorting + when
-    # producing per-model predictions. Strongest -> ensembles; weakest
-    # -> simple linear / shrinkage baselines.
-    "OLS-3":   0.55,
-    "ENet+H":  0.50,
-    "GLM+H":   0.52,
-    "PCR":     0.62,
-    "PLS":     0.60,
-    "GBRT+H":  0.72,
-    "NN1":     0.65,
-    "NN2":     0.68,
-    "NN3":     0.74,
-    "NN4":     0.72,
-    "ENS-AVG": 0.80,
-    "ENS-MSE": 0.82,
+    "OLS-3":   0.040,
+    "ENet+H":  0.035,
+    "GLM+H":   0.038,
+    "PCR":     0.050,
+    "PLS":     0.048,
+    "GBRT+H":  0.075,
+    "NN1":     0.055,
+    "NN2":     0.062,
+    "NN3":     0.080,
+    "NN4":     0.078,
+    "ENS-AVG": 0.090,
+    "ENS-MSE": 0.095,
+}
+
+# Per-scenario multiplier on the per-model skill. Trending regimes
+# reward the latent signal more; choppy/crisis regimes degrade it.
+_SCENARIO_SKILL_MULT: Dict[str, float] = {
+    "base":             1.00,
+    "trending":         1.35,
+    "mean_reversion":   0.85,
+    "rotating_leaders": 0.85,
+    "choppy":           0.45,
+    "crisis":           0.50,
+    "factor_rotation":  0.90,
+    "post2016_ciz":     1.05,
+}
+
+# Per-scenario stdev of an additive "implementation noise" overlay applied
+# to each model's H-L series (monthly, decile-mean-return units). This
+# represents model-variance / execution slippage that decile averaging
+# does NOT erase. Higher in choppy/crisis to widen drawdowns and keep
+# Sharpe modest even for the best ensembles.
+_SCENARIO_HL_NOISE: Dict[str, float] = {
+    "base":             0.012,
+    "trending":         0.010,
+    "mean_reversion":   0.013,
+    "rotating_leaders": 0.013,
+    "choppy":           0.022,
+    "crisis":           0.018,
+    "factor_rotation":  0.012,
+    "post2016_ciz":     0.012,
+}
+
+# Per-scenario H-L drawdown injection: (month_index, magnitude) pairs
+# applied to the long-short series after construction. Lets us mark a
+# crisis regime as one where the model also loses money (not just the
+# market). Empty list = no injection.
+_SCENARIO_HL_SHOCKS: Dict[str, Tuple[Tuple[int, float], ...]] = {
+    "base":             (),
+    "trending":         (),
+    "mean_reversion":   (),
+    "rotating_leaders": (),
+    "choppy":           (),
+    "crisis":           ((30, -0.055), (31, -0.030), (32, -0.015)),
+    "factor_rotation":  (),
+    "post2016_ciz":     (),
 }
 
 
-def _model_skill(model: str) -> float:
-    return float(_MODEL_SKILL.get(model, 0.55))
+def _model_skill(model: str, scenario: str | None = None) -> float:
+    base = float(_MODEL_SKILL.get(model, 0.040))
+    if scenario is None:
+        return base
+    mult = float(_SCENARIO_SKILL_MULT.get(scenario, 1.0))
+    return float(np.clip(base * mult, 0.0, 0.30))
 
 
 def _model_signal_array(
@@ -700,14 +753,18 @@ def _model_signal_array(
 ) -> np.ndarray:
     """Per-model synthetic signal = correlated mix of latent + noise.
 
-    The mix weight is the model's "skill" — ensembles correlate ~0.80
-    with the latent expected return, simple baselines ~0.55. This makes
-    every per-model decile sort inherit the underlying regime dynamics
-    while still preserving a leaderboard.
+    The mix weight is the model's per-scenario "skill" — small numbers
+    (≤0.10) because 80-stock decile averaging makes even tiny per-stock
+    correlations translate into substantial H-L Sharpes.
     """
     latent = panel["latent_expected_ret"].to_numpy(dtype=np.float64)
     z = (latent - latent.mean()) / (latent.std() + 1e-9)
-    rho = _model_skill(model)
+    scenario = (
+        str(panel["scenario"].iloc[0]).replace("future2026_", "")
+        if "scenario" in panel.columns and len(panel)
+        else None
+    )
+    rho = _model_skill(model, scenario)
     noise = rng.standard_normal(size=z.shape)
     return rho * z + float(np.sqrt(max(1.0 - rho ** 2, 0.0))) * noise
 
@@ -744,19 +801,52 @@ def _decile_returns_from_panel_for_model(
 
     Uses a deterministic per-(scenario, model) seed for the signal so
     decile outputs are reproducible regardless of caller-side RNG state.
+
+    Adds two calibration overlays so panel-derived Sharpes are plausible:
+      * an additive monthly H-L noise overlay (model variance / slippage
+        that survives decile averaging), spread evenly across decile 10
+        (+) and decile 1 (-) so the H-L identity 10 - 1 still holds;
+      * scenario-specific H-L drawdown shocks (e.g. the crisis regime
+        also costs the model money, not just the market).
     """
-    scenario = (
+    scenario_full = (
         str(panel["scenario"].iloc[0])
         if "scenario" in panel.columns and len(panel)
         else "unknown"
     )
-    seed = _stable_seed("model_signal", scenario, model)
+    scenario = scenario_full.replace("future2026_", "")
+    seed = _stable_seed("model_signal", scenario_full, model)
     local_rng = np.random.default_rng(seed)
     sig = _model_signal_array(panel, model, local_rng)
     work = panel[["date", "permno", "ret"]].copy()
     work["__signal__"] = sig
     decile_map = decile_returns_from_panel(work, signal_col="__signal__")
-    return {k: v.copy() for k, v in decile_map.items()}
+    out = {k: v.copy() for k, v in decile_map.items()}
+
+    # H-L noise overlay — deterministic per (scenario, model).
+    overlay_sigma = float(_SCENARIO_HL_NOISE.get(scenario, 0.012))
+    overlay_rng = np.random.default_rng(_stable_seed("hl_overlay", scenario_full, model))
+    n = len(out["H-L"])
+    overlay = overlay_rng.normal(0.0, overlay_sigma, size=n)
+
+    # Apply overlay symmetrically: top decile +overlay/2, bottom -overlay/2.
+    # This preserves the H-L = 10 - 1 identity in the resulting series.
+    if "10" in out:
+        out["10"] = (out["10"] + overlay / 2.0).rename("10")
+    if "1" in out:
+        out["1"] = (out["1"] - overlay / 2.0).rename("1")
+
+    # Scenario-specific H-L drawdown shocks — applied to top/bottom
+    # deciles symmetrically as well, so the H-L identity stays consistent.
+    for (t_idx, mag) in _SCENARIO_HL_SHOCKS.get(scenario, ()):
+        if 0 <= t_idx < n:
+            if "10" in out:
+                out["10"].iloc[t_idx] = float(out["10"].iloc[t_idx] + mag / 2.0)
+            if "1" in out:
+                out["1"].iloc[t_idx] = float(out["1"].iloc[t_idx] - mag / 2.0)
+
+    out["H-L"] = (out["10"] - out["1"]).rename("H-L")
+    return out
 
 
 def generate_variant(
