@@ -1,0 +1,115 @@
+{
+  "OLS-3": {
+    "oos_r2_pct": 0.061293,
+    "hl_sharpe": 0.106382,
+    "hl_sharpe_gross": 0.447048,
+    "hl_mean_turnover_one_way": 1.579706,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENet+H": {
+    "oos_r2_pct": 0.055843,
+    "hl_sharpe": 1.295648,
+    "hl_sharpe_gross": 1.603487,
+    "hl_mean_turnover_one_way": 1.548936,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "PCR": {
+    "oos_r2_pct": 0.139159,
+    "hl_sharpe": -0.144232,
+    "hl_sharpe_gross": 0.162131,
+    "hl_mean_turnover_one_way": 1.541875,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "PLS": {
+    "oos_r2_pct": 0.027632,
+    "hl_sharpe": 0.405143,
+    "hl_sharpe_gross": 0.668504,
+    "hl_mean_turnover_one_way": 1.54207,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "GLM+H": {
+    "oos_r2_pct": 0.036182,
+    "hl_sharpe": 0.250898,
+    "hl_sharpe_gross": 0.510248,
+    "hl_mean_turnover_one_way": 1.547066,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "GBRT+H": {
+    "oos_r2_pct": 0.194556,
+    "hl_sharpe": 0.633695,
+    "hl_sharpe_gross": 0.903592,
+    "hl_mean_turnover_one_way": 1.558131,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN1": {
+    "oos_r2_pct": 0.159242,
+    "hl_sharpe": 0.254741,
+    "hl_sharpe_gross": 0.543489,
+    "hl_mean_turnover_one_way": 1.550438,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN2": {
+    "oos_r2_pct": 0.096678,
+    "hl_sharpe": 0.926892,
+    "hl_sharpe_gross": 1.247032,
+    "hl_mean_turnover_one_way": 1.558167,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN3": {
+    "oos_r2_pct": 0.252194,
+    "hl_sharpe": 0.757147,
+    "hl_sharpe_gross": 1.09528,
+    "hl_mean_turnover_one_way": 1.562518,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN4": {
+    "oos_r2_pct": 0.199199,
+    "hl_sharpe": 1.507371,
+    "hl_sharpe_gross": 1.749983,
+    "hl_mean_turnover_one_way": 1.55933,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENS-AVG": {
+    "oos_r2_pct": 0.240127,
+    "hl_sharpe": 1.636301,
+    "hl_sharpe_gross": 1.897393,
+    "hl_mean_turnover_one_way": 1.553417,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENS-MSE": {
+    "oos_r2_pct": 0.290936,
+    "hl_sharpe": 1.501252,
+    "hl_sharpe_gross": 1.759007,
+    "hl_mean_turnover_one_way": 1.561274,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "_reporting": {
+    "variant": "future2026_rotating_leaders",
+    "scenario": "rotating_leaders",
+    "data_start": "2026-04-30",
+    "data_end": "2036-03-31",
+    "test_start": "2026-04-30",
+    "test_end": "2036-03-31",
+    "synthetic": true,
+    "n_months": 120,
+    "engine_tc_bps": 10.0,
+    "panel_source": "synthetic_stock_level",
+    "panel_path": "data/cache/synthetic_panels/future2026_rotating_leaders.parquet",
+    "n_stocks": 800,
+    "n_rows": 96000,
+    "panel_start": "2026-04-30",
+    "panel_end": "2036-03-31"
+  }
+}

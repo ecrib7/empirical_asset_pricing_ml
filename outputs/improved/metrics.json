@@ -1,0 +1,108 @@
+{
+  "OLS-3": {
+    "oos_r2_pct": 0.167698,
+    "hl_sharpe": 0.268851,
+    "hl_sharpe_gross": 0.374267,
+    "hl_mean_turnover_one_way": 1.537658,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENet+H": {
+    "oos_r2_pct": 0.086192,
+    "hl_sharpe": 0.183849,
+    "hl_sharpe_gross": 0.273063,
+    "hl_mean_turnover_one_way": 1.556455,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "PCR": {
+    "oos_r2_pct": 0.14548,
+    "hl_sharpe": 0.317375,
+    "hl_sharpe_gross": 0.417948,
+    "hl_mean_turnover_one_way": 1.55201,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "PLS": {
+    "oos_r2_pct": 0.16882,
+    "hl_sharpe": 0.331225,
+    "hl_sharpe_gross": 0.427045,
+    "hl_mean_turnover_one_way": 1.558833,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "GLM+H": {
+    "oos_r2_pct": 0.117856,
+    "hl_sharpe": 0.243221,
+    "hl_sharpe_gross": 0.339746,
+    "hl_mean_turnover_one_way": 1.550257,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "GBRT+H": {
+    "oos_r2_pct": 0.39085,
+    "hl_sharpe": 0.424805,
+    "hl_sharpe_gross": 0.520631,
+    "hl_mean_turnover_one_way": 1.550747,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN1": {
+    "oos_r2_pct": 0.226775,
+    "hl_sharpe": 0.381957,
+    "hl_sharpe_gross": 0.48183,
+    "hl_mean_turnover_one_way": 1.543983,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN2": {
+    "oos_r2_pct": 0.288024,
+    "hl_sharpe": 0.4372,
+    "hl_sharpe_gross": 0.543799,
+    "hl_mean_turnover_one_way": 1.555544,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN3": {
+    "oos_r2_pct": 0.329006,
+    "hl_sharpe": 0.47013,
+    "hl_sharpe_gross": 0.575553,
+    "hl_mean_turnover_one_way": 1.544721,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN4": {
+    "oos_r2_pct": 0.415852,
+    "hl_sharpe": 0.471452,
+    "hl_sharpe_gross": 0.568413,
+    "hl_mean_turnover_one_way": 1.557823,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENS-AVG": {
+    "oos_r2_pct": 0.478214,
+    "hl_sharpe": 0.650223,
+    "hl_sharpe_gross": 0.75754,
+    "hl_mean_turnover_one_way": 1.547683,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENS-MSE": {
+    "oos_r2_pct": 0.547375,
+    "hl_sharpe": 0.636408,
+    "hl_sharpe_gross": 0.742054,
+    "hl_mean_turnover_one_way": 1.552876,
+    "hl_engine_tc_bps": 15.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "_reporting": {
+    "variant": "improved",
+    "scenario": "improved",
+    "data_start": "1957-01-01",
+    "data_end": "2024-12-31",
+    "test_start": "1987-01-01",
+    "test_end": "2024-12-31",
+    "n_months": 456,
+    "engine_tc_bps": 15.0
+  }
+}

@@ -1,0 +1,186 @@
+2026-04-04 13:14:31,965 | INFO | __main__ | === Running TEST PIPELINE with synthetic data ===
+2026-04-04 13:14:37,492 | INFO | __main__ | Synthetic dataset: 143,600 obs � 45 cols
+2026-04-04 13:14:41,794 | INFO | __main__ | === Step 5: Initialising models ===
+2026-04-04 13:14:41,794 | INFO | __main__ | Models: ['OLS-3', 'ENet+H', 'RF', 'NN3']
+2026-04-04 13:14:41,794 | INFO | __main__ | === Step 6: Running recursive backtest ===
+2026-04-04 13:14:41,950 | INFO | src.backtest.engine | Test year 1987: train=69,200  val=2,400  test=2,400
+2026-04-04 13:14:41,975 | ERROR | src.backtest.engine | OLS-3 failed at 1987: Found array with 0 feature(s) (shape=(69200, 0)) while a minimum of 1 is required by LinearRegression.
+2026-04-04 13:24:40,348 | INFO | __main__ | === Running TEST PIPELINE with synthetic data ===
+2026-04-04 13:24:46,165 | INFO | __main__ | Synthetic dataset: 143,600 obs � 48 cols
+2026-04-04 13:24:48,537 | INFO | __main__ | === Step 5: Initialising models ===
+2026-04-04 13:24:48,537 | INFO | __main__ | Models: ['OLS-3', 'ENet+H', 'RF', 'NN3']
+2026-04-04 13:24:48,537 | INFO | __main__ | === Step 6: Running recursive backtest ===
+2026-04-04 13:24:48,694 | INFO | src.backtest.engine | Test year 1987: train=69,200  val=2,400  test=2,400
+2026-04-04 13:39:37,230 | INFO | src.backtest.engine | Test year 1988: train=71,600  val=2,400  test=2,400
+2026-04-07 13:28:00,450 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-07 13:28:00,451 | INFO | src.data.wrds_loader | Fetching crsp_monthly_1957_2016 from WRDS...
+2026-04-07 13:28:00,451 | INFO | src.data.wrds_loader | Connecting to WRDS...
+2026-04-07 13:28:35,168 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-07 13:28:35,168 | INFO | src.data.wrds_loader | Fetching crsp_monthly_1957_2016 from WRDS...
+2026-04-07 13:28:35,168 | INFO | src.data.wrds_loader | Connecting to WRDS...
+2026-04-07 13:28:57,064 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-07 13:28:57,080 | INFO | src.data.wrds_loader | Fetching crsp_monthly_1957_2016 from WRDS...
+2026-04-07 13:28:57,080 | INFO | src.data.wrds_loader | Connecting to WRDS...
+2026-04-07 13:30:57,077 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-07 13:30:57,077 | INFO | src.data.wrds_loader | Fetching crsp_monthly_1957_2016 from WRDS...
+2026-04-07 13:30:57,078 | INFO | src.data.wrds_loader | Connecting to WRDS...
+2026-04-07 13:31:24,795 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-07 13:31:24,795 | INFO | src.data.wrds_loader | Fetching crsp_monthly_1957_2016 from WRDS...
+2026-04-07 13:31:24,795 | INFO | src.data.wrds_loader | Connecting to WRDS...
+2026-04-07 13:33:00,526 | INFO | __main__ | === Running TEST PIPELINE with synthetic data ===
+2026-04-07 13:36:16,552 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-07 13:36:16,552 | INFO | src.data.wrds_loader | Fetching crsp_monthly_1957_2016 from WRDS...
+2026-04-07 13:36:16,553 | INFO | src.data.wrds_loader | Connecting to WRDS...
+2026-04-07 13:37:26,684 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-07 13:37:26,684 | INFO | src.data.wrds_loader | Fetching crsp_monthly_1957_2016 from WRDS...
+2026-04-07 13:37:26,684 | INFO | src.data.wrds_loader | Connecting to WRDS...
+2026-04-07 13:39:54,445 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-07 13:39:54,446 | INFO | src.data.wrds_loader | Fetching crsp_monthly_1957_2016 from WRDS...
+2026-04-07 13:39:54,446 | INFO | src.data.wrds_loader | Connecting to WRDS...
+2026-04-07 15:08:13,865 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-07 15:08:13,867 | INFO | src.data.wrds_loader | Fetching crsp_monthly_1957_2016 from WRDS...
+2026-04-07 15:08:13,867 | INFO | src.data.wrds_loader | Connecting to WRDS...
+2026-04-07 23:35:23,154 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-07 23:35:23,155 | INFO | src.data.wrds_loader | Fetching crsp_monthly_1957_2016 from WRDS...
+2026-04-07 23:35:23,155 | INFO | src.data.wrds_loader | Connecting to WRDS...
+2026-04-07 23:36:41,003 | INFO | src.data.wrds_loader | Cached crsp_monthly_1957_2016 → data/cache/crsp_monthly_1957_2016.parquet
+2026-04-07 23:36:41,003 | INFO | src.data.wrds_loader | Fetching compustat_annual_1957_2016 from WRDS...
+2026-04-07 23:37:19,936 | INFO | src.data.wrds_loader | Cached compustat_annual_1957_2016 → data/cache/compustat_annual_1957_2016.parquet
+2026-04-07 23:37:19,937 | INFO | src.data.wrds_loader | Fetching compustat_quarterly_1957_2016 from WRDS...
+2026-04-07 23:38:31,624 | INFO | src.data.wrds_loader | Cached compustat_quarterly_1957_2016 → data/cache/compustat_quarterly_1957_2016.parquet
+2026-04-07 23:38:31,624 | INFO | src.data.wrds_loader | Fetching ccm_link from WRDS...
+2026-04-07 23:38:31,957 | INFO | src.data.wrds_loader | Cached ccm_link → data/cache/ccm_link.parquet
+2026-04-07 23:38:31,971 | WARNING | src.data.wrds_loader | Could not fetch macro from WRDS: (psycopg2.errors.UndefinedTable) relation "goyal.macro_predictors" does not exist
+LINE 3:             FROM goyal.macro_predictors
+                         ^
+
+[SQL: 
+            SELECT date, dp, ep, bm, ntis, tbl, lty, baa, aaa, svar
+            FROM goyal.macro_predictors
+            WHERE date BETWEEN '1957-01-01' AND '2016-12-31'
+        ]
+(Background on this error at: https://sqlalche.me/e/14/f405)
+2026-04-07 23:38:31,971 | WARNING | src.data.wrds_loader | Using synthetic macro predictor stubs. Download PredictorData2023.xlsx from Amit Goyal's website for real data.
+2026-04-07 23:38:31,989 | INFO | __main__ | === Step 2: Merging CRSP + Compustat ===
+2026-04-07 23:38:40,579 | INFO | __main__ | === Step 3: Building characteristics ===
+2026-04-08 00:00:07,465 | INFO | __main__ | === Step 4: Building feature matrix ===
+2026-04-08 00:03:07,103 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-08 00:03:07,103 | INFO | src.data.wrds_loader | Loading cached crsp_monthly_1957_2016...
+2026-04-08 00:03:07,484 | INFO | src.data.wrds_loader | Loading cached compustat_annual_1957_2016...
+2026-04-08 00:03:07,731 | INFO | src.data.wrds_loader | Loading cached compustat_quarterly_1957_2016...
+2026-04-08 00:03:08,259 | INFO | src.data.wrds_loader | Loading cached ccm_link...
+2026-04-08 00:03:08,283 | INFO | __main__ | === Step 2: Merging CRSP + Compustat ===
+2026-04-08 00:03:19,333 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-08 00:03:19,334 | INFO | src.data.wrds_loader | Loading cached crsp_monthly_1957_2016...
+2026-04-08 00:03:19,596 | INFO | src.data.wrds_loader | Loading cached compustat_annual_1957_2016...
+2026-04-08 00:03:25,136 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-08 00:03:25,137 | INFO | src.data.wrds_loader | Loading cached crsp_monthly_1957_2016...
+2026-04-08 00:03:25,364 | INFO | src.data.wrds_loader | Loading cached compustat_annual_1957_2016...
+2026-04-08 00:03:31,199 | INFO | __main__ | === Step 1: Loading WRDS data ===
+2026-04-08 00:03:31,199 | INFO | src.data.wrds_loader | Loading cached crsp_monthly_1957_2016...
+2026-04-08 00:03:31,442 | INFO | src.data.wrds_loader | Loading cached compustat_annual_1957_2016...
+2026-04-08 00:03:31,645 | INFO | src.data.wrds_loader | Loading cached compustat_quarterly_1957_2016...
+2026-04-08 00:03:32,005 | INFO | src.data.wrds_loader | Loading cached ccm_link...
+2026-04-08 00:03:32,026 | INFO | __main__ | === Step 2: Merging CRSP + Compustat ===
+2026-04-08 00:03:40,096 | INFO | __main__ | === Step 3: Building characteristics ===
+2026-04-08 00:27:02,845 | INFO | __main__ | === Step 4: Building feature matrix ===
+2026-04-08 00:28:12,203 | INFO | __main__ | === Step 5: Initialising models ===
+2026-04-08 00:28:12,209 | INFO | __main__ | Models: ['OLS-3', 'ENet+H', 'PCR', 'PLS', 'GLM+H']
+2026-04-08 00:28:12,209 | INFO | __main__ | === Step 6: Running recursive backtest ===
+2026-04-08 00:28:12,551 | INFO | src.backtest.engine | Test year 1987: train=69,200  val=2,400  test=2,400
+2026-04-08 00:28:20,077 | INFO | src.backtest.engine | Test year 1988: train=71,600  val=2,400  test=2,400
+2026-04-08 00:28:27,399 | INFO | src.backtest.engine | Test year 1989: train=74,000  val=2,400  test=2,400
+2026-04-08 00:28:36,131 | INFO | src.backtest.engine | Test year 1990: train=76,400  val=2,400  test=2,400
+2026-04-08 00:28:43,536 | INFO | src.backtest.engine | Test year 1991: train=78,800  val=2,400  test=2,400
+2026-04-08 00:28:51,376 | INFO | src.backtest.engine | Test year 1992: train=81,200  val=2,400  test=2,400
+2026-04-08 00:28:59,140 | INFO | src.backtest.engine | Test year 1993: train=83,600  val=2,400  test=2,400
+2026-04-08 00:29:07,575 | INFO | src.backtest.engine | Test year 1994: train=86,000  val=2,400  test=2,400
+2026-04-08 00:29:17,181 | INFO | src.backtest.engine | Test year 1995: train=88,400  val=2,400  test=2,400
+2026-04-08 00:29:25,644 | INFO | src.backtest.engine | Test year 1996: train=90,800  val=2,400  test=2,400
+2026-04-08 00:29:35,389 | INFO | src.backtest.engine | Test year 1997: train=93,200  val=2,400  test=2,400
+2026-04-08 00:29:45,377 | INFO | src.backtest.engine | Test year 1998: train=95,600  val=2,400  test=2,400
+2026-04-08 00:29:55,125 | INFO | src.backtest.engine | Test year 1999: train=98,000  val=2,400  test=2,400
+2026-04-08 00:30:03,975 | INFO | src.backtest.engine | Test year 2000: train=100,400  val=2,400  test=2,400
+2026-04-08 00:30:15,158 | INFO | src.backtest.engine | Test year 2001: train=102,800  val=2,400  test=2,400
+2026-04-08 00:30:26,135 | INFO | src.backtest.engine | Test year 2002: train=105,200  val=2,400  test=2,400
+2026-04-08 00:30:37,311 | INFO | src.backtest.engine | Test year 2003: train=107,600  val=2,400  test=2,400
+2026-04-08 00:30:47,881 | INFO | src.backtest.engine | Test year 2004: train=110,000  val=2,400  test=2,400
+2026-04-08 00:30:58,857 | INFO | src.backtest.engine | Test year 2005: train=112,400  val=2,400  test=2,400
+2026-04-08 00:31:10,787 | INFO | src.backtest.engine | Test year 2006: train=114,800  val=2,400  test=2,400
+2026-04-08 00:31:20,780 | INFO | src.backtest.engine | Test year 2007: train=117,200  val=2,400  test=2,400
+2026-04-08 00:31:32,577 | INFO | src.backtest.engine | Test year 2008: train=119,600  val=2,400  test=2,400
+2026-04-08 00:31:44,585 | INFO | src.backtest.engine | Test year 2009: train=122,000  val=2,400  test=2,400
+2026-04-08 00:31:56,804 | INFO | src.backtest.engine | Test year 2010: train=124,400  val=2,400  test=2,400
+2026-04-08 00:32:09,554 | INFO | src.backtest.engine | Test year 2011: train=126,800  val=2,400  test=2,400
+2026-04-08 00:32:23,417 | INFO | src.backtest.engine | Test year 2012: train=129,200  val=2,400  test=2,400
+2026-04-08 00:32:36,917 | INFO | src.backtest.engine | Test year 2013: train=131,600  val=2,400  test=2,400
+2026-04-08 00:32:51,450 | INFO | src.backtest.engine | Test year 2014: train=134,000  val=2,400  test=2,400
+2026-04-08 00:33:03,999 | INFO | src.backtest.engine | Test year 2015: train=136,400  val=2,400  test=2,400
+2026-04-08 00:33:16,765 | INFO | src.backtest.engine | Test year 2016: train=138,800  val=2,400  test=2,400
+2026-04-08 00:35:10,391 | INFO | __main__ | === Step 5: Initialising models ===
+2026-04-08 00:35:10,391 | INFO | __main__ | Models: ['OLS-3', 'ENet+H', 'PCR', 'PLS', 'GLM+H']
+2026-04-08 00:35:10,391 | INFO | __main__ | === Step 6: Running recursive backtest ===
+2026-04-08 00:35:10,703 | INFO | src.backtest.engine | Test year 1987: train=69,200  val=2,400  test=2,400
+2026-04-08 00:35:18,781 | INFO | src.backtest.engine | Test year 1988: train=71,600  val=2,400  test=2,400
+2026-04-08 00:35:26,495 | INFO | src.backtest.engine | Test year 1989: train=74,000  val=2,400  test=2,400
+2026-04-08 00:35:35,679 | INFO | src.backtest.engine | Test year 1990: train=76,400  val=2,400  test=2,400
+2026-04-08 00:35:44,434 | INFO | src.backtest.engine | Test year 1991: train=78,800  val=2,400  test=2,400
+2026-04-08 00:35:52,402 | INFO | src.backtest.engine | Test year 1992: train=81,200  val=2,400  test=2,400
+2026-04-08 00:36:01,005 | INFO | src.backtest.engine | Test year 1993: train=83,600  val=2,400  test=2,400
+2026-04-08 00:36:09,149 | INFO | src.backtest.engine | Test year 1994: train=86,000  val=2,400  test=2,400
+2026-04-08 00:36:17,916 | INFO | src.backtest.engine | Test year 1995: train=88,400  val=2,400  test=2,400
+2026-04-08 00:36:26,825 | INFO | src.backtest.engine | Test year 1996: train=90,800  val=2,400  test=2,400
+2026-04-08 00:36:36,524 | INFO | src.backtest.engine | Test year 1997: train=93,200  val=2,400  test=2,400
+2026-04-08 00:36:46,022 | INFO | src.backtest.engine | Test year 1998: train=95,600  val=2,400  test=2,400
+2026-04-08 00:36:58,408 | INFO | src.backtest.engine | Test year 1999: train=98,000  val=2,400  test=2,400
+2026-04-08 00:37:06,536 | INFO | src.backtest.engine | Test year 2000: train=100,400  val=2,400  test=2,400
+2026-04-08 00:37:17,252 | INFO | src.backtest.engine | Test year 2001: train=102,800  val=2,400  test=2,400
+2026-04-08 00:37:28,834 | INFO | src.backtest.engine | Test year 2002: train=105,200  val=2,400  test=2,400
+2026-04-08 00:37:38,895 | INFO | src.backtest.engine | Test year 2003: train=107,600  val=2,400  test=2,400
+2026-04-08 00:37:48,966 | INFO | src.backtest.engine | Test year 2004: train=110,000  val=2,400  test=2,400
+2026-04-08 00:38:06,394 | INFO | src.backtest.engine | Test year 2005: train=112,400  val=2,400  test=2,400
+2026-04-08 00:38:34,632 | INFO | src.backtest.engine | Test year 2006: train=114,800  val=2,400  test=2,400
+2026-04-08 00:38:56,424 | INFO | src.backtest.engine | Test year 2007: train=117,200  val=2,400  test=2,400
+2026-04-08 00:39:15,431 | INFO | src.backtest.engine | Test year 2008: train=119,600  val=2,400  test=2,400
+2026-04-08 00:39:40,537 | INFO | src.backtest.engine | Test year 2009: train=122,000  val=2,400  test=2,400
+2026-04-08 00:39:52,433 | INFO | src.backtest.engine | Test year 2010: train=124,400  val=2,400  test=2,400
+2026-04-08 00:40:03,857 | INFO | src.backtest.engine | Test year 2011: train=126,800  val=2,400  test=2,400
+2026-04-08 00:40:17,347 | INFO | src.backtest.engine | Test year 2012: train=129,200  val=2,400  test=2,400
+2026-04-08 00:40:30,954 | INFO | src.backtest.engine | Test year 2013: train=131,600  val=2,400  test=2,400
+2026-04-08 00:40:43,899 | INFO | src.backtest.engine | Test year 2014: train=134,000  val=2,400  test=2,400
+2026-04-08 00:40:56,832 | INFO | src.backtest.engine | Test year 2015: train=136,400  val=2,400  test=2,400
+2026-04-08 00:41:09,482 | INFO | src.backtest.engine | Test year 2016: train=138,800  val=2,400  test=2,400
+2026-04-08 00:41:45,939 | INFO | __main__ | Saved OLS-3 → outputs/models/OLS-3.pkl
+2026-04-08 00:41:45,943 | INFO | __main__ | Saved ENet+H → outputs/models/ENet+H.pkl
+2026-04-08 00:41:45,947 | INFO | __main__ | Saved PCR → outputs/models/PCR.pkl
+2026-04-08 00:41:45,951 | INFO | __main__ | Saved PLS → outputs/models/PLS.pkl
+2026-04-08 00:41:45,956 | INFO | __main__ | Saved GLM+H → outputs/models/GLM+H.pkl
+2026-04-08 00:41:45,956 | INFO | __main__ | === Train stage complete. Results saved per-model. ===
+2026-04-08 00:41:45,956 | INFO | __main__ | Existing model results in outputs/models/: ['ENet+H', 'GLM+H', 'OLS-3', 'PCR', 'PLS']
+2026-04-08 00:41:45,960 | INFO | __main__ | Pipeline complete.
+2026-04-08 00:41:59,504 | INFO | __main__ | === Step 5: Initialising models ===
+2026-04-08 00:41:59,505 | INFO | __main__ | Models: ['RF', 'GBRT+H']
+2026-04-08 00:41:59,505 | INFO | __main__ | === Step 6: Running recursive backtest ===
+2026-04-08 00:41:59,875 | INFO | src.backtest.engine | Test year 1987: train=69,200  val=2,400  test=2,400
+2026-04-08 00:49:12,213 | INFO | __main__ | Loaded results for 5 models: ['ENet+H', 'GLM+H', 'OLS-3', 'PCR', 'PLS']
+2026-04-08 00:49:13,850 | INFO | __main__ | 
+============================================================
+2026-04-08 00:49:13,850 | INFO | __main__ | OOS R² Table (%):
+2026-04-08 00:49:13,851 | INFO | __main__ | 
+ENet+H    0.099998
+GLM+H     0.079200
+OLS-3    -0.041298
+PCR      -0.006520
+PLS       0.007855
+2026-04-08 00:49:13,851 | INFO | __main__ | 
+H-L Sharpe Ratios:
+2026-04-08 00:49:13,853 | INFO | __main__ | 
+        H-L Sharpe
+Model             
+ENet+H    0.634961
+GLM+H     0.629353
+OLS-3     0.000223
+PCR       0.354756
+PLS       0.712215
+2026-04-08 00:49:13,875 | INFO | __main__ | All outputs saved to outputs/
+2026-04-08 00:49:13,876 | INFO | __main__ | Pipeline complete.

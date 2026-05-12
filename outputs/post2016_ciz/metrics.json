@@ -1,0 +1,108 @@
+{
+  "OLS-3": {
+    "oos_r2_pct": 0.015798,
+    "hl_sharpe": -0.001946,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.540915,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENet+H": {
+    "oos_r2_pct": 0.007678,
+    "hl_sharpe": -0.001094,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.552429,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "PCR": {
+    "oos_r2_pct": 0.017737,
+    "hl_sharpe": -0.001578,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.55149,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "PLS": {
+    "oos_r2_pct": 0.018508,
+    "hl_sharpe": -0.002517,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.54125,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "GLM+H": {
+    "oos_r2_pct": 0.009245,
+    "hl_sharpe": -0.001499,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.558394,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "GBRT+H": {
+    "oos_r2_pct": 0.030184,
+    "hl_sharpe": -0.001857,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.542623,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN1": {
+    "oos_r2_pct": 0.025595,
+    "hl_sharpe": -0.001604,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.568403,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN2": {
+    "oos_r2_pct": 0.028116,
+    "hl_sharpe": -0.001873,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.536625,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN3": {
+    "oos_r2_pct": 0.036046,
+    "hl_sharpe": -0.001496,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.559121,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "NN4": {
+    "oos_r2_pct": 0.030941,
+    "hl_sharpe": -0.001306,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.548138,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENS-AVG": {
+    "oos_r2_pct": 0.028851,
+    "hl_sharpe": -0.002028,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.544995,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "ENS-MSE": {
+    "oos_r2_pct": 0.040501,
+    "hl_sharpe": -0.001486,
+    "hl_sharpe_gross": 0.001314,
+    "hl_mean_turnover_one_way": 1.555273,
+    "hl_engine_tc_bps": 10.0,
+    "hl_returns_are_net_of_tc": true
+  },
+  "_reporting": {
+    "variant": "post2016_ciz",
+    "scenario": "post2016_ciz",
+    "data_start": "2015-01-01",
+    "data_end": "2026-03-31",
+    "test_start": "2017-01-01",
+    "test_end": "2026-03-31",
+    "n_months": 111,
+    "engine_tc_bps": 10.0
+  }
+}

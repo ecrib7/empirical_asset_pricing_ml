@@ -1,0 +1,39 @@
+{
+  "ciz_real_data_end": "2026-03-31",
+  "generated_at_utc": "2026-05-10T16:57:47Z",
+  "legacy_real_data_end": "2024-12-31",
+  "notes": "real_data_end prefers the furthest CIZ/v2 monthly endpoint (crsp_q_stock.stkmthsecuritydata / crsp_q_stock.msf_v2 / crsp.stkmthsecuritydata / crsp.msf_v2) and falls back to min(crsp.msf.max_date, crsp.msenames.max_nameendt) when no CIZ table is available. Dates strictly after real_data_end must be treated as synthetic. synthetic_start is the next month-end after real_data_end.",
+  "real_data_end": "2026-03-31",
+  "synthetic_start": "2026-04-30",
+  "tables": {
+    "comp.funda": {
+      "max_datadate": "2026-04-30"
+    },
+    "comp.fundq": {
+      "max_datadate": "2026-04-30"
+    },
+    "crsp.ccmxpf_linktable": {
+      "max_linkdt": "2025-12-31",
+      "max_linkenddt": "2026-01-30"
+    },
+    "crsp.msenames": {
+      "max_namedt": "2024-12-31",
+      "max_nameendt": "2024-12-31"
+    },
+    "crsp.msf": {
+      "max_date": "2024-12-31"
+    },
+    "crsp.msf_v2": {
+      "max_mthcaldt": "2025-12-31"
+    },
+    "crsp.stkmthsecuritydata": {
+      "max_mthcaldt": "2025-12-31"
+    },
+    "crsp_q_stock.msf_v2": {
+      "max_mthcaldt": "2026-03-31"
+    },
+    "crsp_q_stock.stkmthsecuritydata": {
+      "max_mthcaldt": "2026-03-31"
+    }
+  }
+}
